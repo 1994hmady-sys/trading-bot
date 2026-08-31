@@ -1,8 +1,12 @@
+import os
 import time
+import threading
 import requests
 import feedparser
-from datetime import datetime
+from flask import Flask
 from live_simulator import LivePaperEngine
+
+app = Flask(__name__)
 
 TELEGRAM_BOT_TOKEN = "7950965005:AAEUhM4c_UqF_XQkF50xQG9Z-0P0kS_qf84"
 TELEGRAM_CHAT_ID = "6176503816"
@@ -45,28 +49,23 @@ class MasterMacroBrain:
     def analyze_opportunities(self, events):
         signals = []
         for text in events:
-            # محرك الملاذات الآمنة والأزمات الجيوسياسية / البنوك
             if any(w in text for w in ["war", "conflict", "crisis", "bank collapse", "inflation surge", "escalation", "tensions"]):
                 signals.append({"asset": "PAXGUSDT", "direction": "BUY", "catalyst": "ملاذ آمن / توترات واضطرابات كبرى", "weight": 0.20})
                 signals.append({"asset": "BTCUSDT", "direction": "BUY", "catalyst": "تحوط ضد النظام المالي والسيولة", "weight": 0.15})
-            
-            # محرك النمو وتخفيض الفائدة وضخ السيولة
             elif any(w in text for w in ["rate cut", "fed eases", "liquidity", "stimulus", "bullish", "rally", "growth"]):
                 signals.append({"asset": "ETHUSDT", "direction": "BUY", "catalyst": "توسع السيولة العالمية وأصول المخاطرة", "weight": 0.15})
                 signals.append({"asset": "SOLUSDT", "direction": "BUY", "catalyst": "زخم المضاربة السريعة والتوسع التقني", "weight": 0.15})
                 signals.append({"asset": "BTCUSDT", "direction": "BUY", "catalyst": "انخفاض الفائدة وضعف مؤشر الدولار", "weight": 0.20})
-                
-            # صدمات الطاقة والأسواق
             elif any(w in text for w in ["oil spike", "energy shortage", "sanctions", "trade war"]):
                 signals.append({"asset": "PAXGUSDT", "direction": "BUY", "catalyst": "صدمة تضخم سلع وطاقة", "weight": 0.15})
         return signals
 
-def main():
+def bot_worker_loop():
     engine = LivePaperEngine(initial_balance=100.0)
     researcher = GlobalMacroResearcher()
     brain = MasterMacroBrain()
 
-    send_telegram_msg("⚡ تم تفعيل العقل الاقتصادي الشامل 24/7\nتم ربط الأسواق، المؤشرات، البنوك، الطاقة، والمعادن بالسيرفر السحابي.")
+    send_telegram_msg("🟢 السيرفر الحي نشط الآن ومحمي من السكون 24/7.")
 
     while True:
         try:
@@ -83,8 +82,17 @@ def main():
                     )
             time.sleep(60)
         except Exception as e:
-            print(f"Engine Loop Error: {e}")
+            print(f"Loop Error: {e}")
             time.sleep(60)
 
+@app.route('/')
+def home():
+    return "Bot is running live 24/7!", 200
+
+# تشغيل حلقة التداول في مسار منفصل خلف خادم الويب
+worker_thread = threading.Thread(target=bot_worker_loop, daemon=True)
+worker_thread.start()
+
 if __name__ == "__main__":
-    main()
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
