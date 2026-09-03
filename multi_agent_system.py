@@ -2,7 +2,6 @@ import os
 import time
 import threading
 import requests
-import feedparser
 from flask import Flask
 from live_simulator import LivePaperEngine
 
@@ -13,141 +12,142 @@ TELEGRAM_CHAT_ID = "6176503816"
 
 WATCHLIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "PAXGUSDT"]
 
-NEWS_FEEDS = [
-    "https://feeds.content.dowjones.io/public/rss/mw_topstories",
-    "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines",
-    "https://cointelegraph.com/rss",
-    "https://www.cnbc.com/id/100003114/device/rss/rss.html",
-    "https://www.investing.com/rss/news_25.rss"
-]
-
 def send_telegram_msg(msg: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Telegram error: {e}")
+        print(f"[Telegram Error] {e}")
 
-class TechnicalMarketScanner:
-    """محرك فني يفحص الأسعار والزخم للدخول في صفقات يومية وسريعة"""
-    def get_market_data(self, symbol):
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=20"
+class PrecisionSniperBrain:
+    """محرك تحليلي متقدم يدمج RSI والمتوسطات المتحركة ونبض السيولة"""
+    
+    def get_klines(self, symbol, interval="15m", limit=35):
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
         try:
-            res = requests.get(url, timeout=5).json()
-            closes = [float(candle[4]) for candle in res]
-            return closes
+            res = requests.get(url, timeout=6).json()
+            closes = [float(k[4]) for k in res]
+            highs = [float(k[2]) for k in res]
+            lows = [float(k[3]) for k in res]
+            volumes = [float(k[5]) for k in res]
+            return closes, highs, lows, volumes
         except Exception:
-            return []
+            return [], [], [], []
 
-    def scan_for_setups(self):
-        signals = []
+    def calculate_rsi(self, prices, period=14):
+        if len(prices) < period + 1:
+            return 50.0
+        gains, losses = [], []
+        for i in range(1, len(prices)):
+            diff = prices[i] - prices[i - 1]
+            gains.append(diff if diff > 0 else 0)
+            losses.append(abs(diff) if diff < 0 else 0)
+        
+        avg_gain = sum(gains[-period:]) / period
+        avg_loss = sum(losses[-period:]) / period
+        if avg_loss == 0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return 100.0 - (100.0 / (1.0 + rs))
+
+    def calculate_ema(self, prices, period):
+        if len(prices) < period:
+            return prices[-1]
+        k = 2 / (period + 1)
+        ema = prices[0]
+        for price in prices[1:]:
+            ema = (price * k) + (ema * (1 - k))
+        return ema
+
+    def scan_sniper_setups(self):
+        opportunities = []
+        market_intel = []
+
         for symbol in WATCHLIST:
-            prices = self.get_market_data(symbol)
-            if len(prices) < 15:
+            closes, highs, lows, volumes = self.get_klines(symbol)
+            if len(closes) < 25:
                 continue
-            
-            current_price = prices[-1]
-            prev_price = prices[-5]
-            change_pct = ((current_price - prev_price) / prev_price) * 100
 
-            # استراتيجية الزخم اللحظي واختراق المدى السعري
-            if change_pct > 0.4:
-                signals.append({
+            current_price = closes[-1]
+            rsi = self.calculate_rsi(closes, period=14)
+            ema_fast = self.calculate_ema(closes, period=9)
+            ema_slow = self.calculate_ema(closes, period=21)
+            vol_avg = sum(volumes[-10:]) / 10
+            vol_spike = volumes[-1] > (vol_avg * 1.3)
+
+            status_note = f"{symbol}: ${current_price:,.2f} | RSI: {rsi:.1f}"
+            market_intel.append(status_note)
+
+            # --- استراتيجية القناص 1: ارتداد من تشبع بيعي حاد مع دخول سيولة ---
+            if rsi < 32 and current_price > closes[-2]:
+                opportunities.append({
                     "asset": symbol,
                     "direction": "BUY",
-                    "catalyst": f"زخم فني صاعد سريع (+{change_pct:.2f}%) على فريم 15 دقيقة",
-                    "weight": 0.15
-                })
-            elif change_pct < -1.2:
-                # ارتداد من تشبع بيعي
-                signals.append({
-                    "asset": symbol,
-                    "direction": "BUY",
-                    "catalyst": f"اقتناص ارتداد سعري بعد هبوط مؤقت ({change_pct:.2f}%)",
+                    "catalyst": f"🎯 قنص تشبع بيعي عميق (RSI={rsi:.1f}) مع ارتداد وانعكاس إيجابي",
                     "weight": 0.12
                 })
-        return signals
 
-class GlobalMacroResearcher:
-    def __init__(self):
-        self.seen_news = set()
+            # --- استراتيجية القناص 2: اختراق ذهبي مع انفجار حجم التداول ---
+            elif ema_fast > ema_slow and closes[-2] <= ema_slow and vol_spike and rsi > 52:
+                opportunities.append({
+                    "asset": symbol,
+                    "direction": "BUY",
+                    "catalyst": f"⚡ اختراق تريند مؤسسي صاعد مدعوم بحجم تداول ضخم (RSI={rsi:.1f})",
+                    "weight": 0.15
+                })
 
-    def scan_world_events(self):
-        events = []
-        for feed_url in NEWS_FEEDS:
-            try:
-                parsed = feedparser.parse(feed_url)
-                for entry in parsed.entries[:5]:
-                    title = entry.title.lower()
-                    if entry.link not in self.seen_news:
-                        self.seen_news.add(entry.link)
-                        events.append(title)
-            except Exception:
-                continue
-        return events
-
-class MasterMacroBrain:
-    def analyze_opportunities(self, events):
-        signals = []
-        for text in events:
-            if any(w in text for w in ["war", "crisis", "bank", "inflation", "tensions", "oil", "gold"]):
-                signals.append({"asset": "PAXGUSDT", "direction": "BUY", "catalyst": "تحوط كلي / توترات واضطرابات", "weight": 0.15})
-                signals.append({"asset": "BTCUSDT", "direction": "BUY", "catalyst": "طلب سيولة وتحوط", "weight": 0.15})
-            elif any(w in text for w in ["rate cut", "fed", "stimulus", "rally", "crypto", "surge", "gain"]):
-                signals.append({"asset": "ETHUSDT", "direction": "BUY", "catalyst": "شهية مخاطرة وتوسع سيولة", "weight": 0.15})
-                signals.append({"asset": "SOLUSDT", "direction": "BUY", "catalyst": "تسارع مضاربي على العملات البديلة", "weight": 0.15})
-        return signals
+        return opportunities, market_intel
 
 def bot_worker_loop():
-    engine = LivePaperEngine(initial_balance=100.0)
-    researcher = GlobalMacroResearcher()
-    brain = MasterMacroBrain()
-    scanner = TechnicalMarketScanner()
+    time.sleep(5)
+    send_telegram_msg("🧠 تم تفعيل عقلية القناص الذكي (Precision Sniper AI)!\nالوضع: فلترة عميقة للفرص عالية الاحتمالية والربح السريع فقط.")
 
-    send_telegram_msg("🚀 تم تفعيل المحرك الهجومي النشط!\nالنظام الآن يضارب فنياً وإخبارياً على مدار اليوم والساعة.")
+    try:
+        engine = LivePaperEngine(initial_balance=100.0)
+    except Exception as e:
+        print(f"[Init Error] {e}")
+        return
 
+    sniper = PrecisionSniperBrain()
     loop_count = 0
+
     while True:
         try:
-            # فحص الصفقات المفتوحة وأهداف الربح
+            # 1. متابعة الصفقات وجني الأرباح فور الوصول للهدف
             engine.check_open_positions(send_telegram_msg)
 
-            # 1. فحص فني لحظي للأسعار (يعمل دائماً حتى بدون أخبار)
-            tech_signals = scanner.scan_for_setups()
-            for sig in tech_signals:
+            # 2. فحص قناص فائق الدقة
+            setups, intel = sniper.scan_sniper_setups()
+
+            for setup in setups:
                 engine.execute_simulated_trade(
-                    asset=sig["asset"],
-                    weight=sig["weight"],
-                    catalyst=sig["catalyst"],
+                    asset=setup["asset"],
+                    weight=setup["weight"],
+                    catalyst=setup["catalyst"],
                     notifier=send_telegram_msg
                 )
 
-            # 2. فحص إخباري عالمي
-            events = researcher.scan_world_events()
-            if events:
-                news_signals = brain.analyze_opportunities(events)
-                for sig in news_signals:
-                    engine.execute_simulated_trade(
-                        asset=sig["asset"],
-                        weight=sig["weight"],
-                        catalyst=sig["catalyst"],
-                        notifier=send_telegram_msg
-                    )
-
-            # إرسال تقرير حالة كل 4 ساعات (كل 240 دورة دقيقة)
+            # 3. تقرير دوري ذكي كل 30 دقيقة لطمأنتك ومتابعة التحليل
             loop_count += 1
-            if loop_count % 240 == 0:
-                send_telegram_msg(f"📊 تقرير دوري:\nالبوت نشط ويعمل في مراقبة الأسواق.\nالرصيد المتاح: ${engine.balance:.2f}\nعدد الصفقات المفتوحة: {len(engine.open_positions)}")
+            if loop_count % 30 == 0:
+                summary_text = "\n".join([f"• {line}" for line in intel])
+                send_telegram_msg(
+                    f"🎯 تقرير القناص الدوري (رصد السوق):\n"
+                    f"السيولة المتاحة: ${engine.balance:.2f}\n"
+                    f"الصفقات المفتوحة: {len(engine.open_positions)}\n\n"
+                    f"📈 مؤشرات الأصول الحالية:\n{summary_text}\n\n"
+                    f"الحالة: في وضع التربص لاقتناص الفرص عالية الدقة."
+                )
 
             time.sleep(60)
         except Exception as e:
-            print(f"Engine Loop Error: {e}")
+            print(f"[Loop Exception] {e}")
             time.sleep(60)
 
 @app.route('/')
 def home():
-    return "Active Scalper Bot Running 24/7", 200
+    return "Institutional Sniper AI Active 24/7", 200
 
 worker_thread = threading.Thread(target=bot_worker_loop, daemon=True)
 worker_thread.start()
