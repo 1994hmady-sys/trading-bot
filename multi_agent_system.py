@@ -7,8 +7,9 @@ from live_simulator import LivePaperEngine
 
 app = Flask(__name__)
 
-TELEGRAM_BOT_TOKEN = "7950965005:AAEUhM4c_UqF_XQkF50xQG9Z-0P0kS_qf84"
-TELEGRAM_CHAT_ID = "6176503816"
+# استخدام متغير البيئة إن وجد أو التوكن المباشر
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8849431477:AAGVNZett1gWBikPg6fWJ4p2CJhQJxWEaaw")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "6176503816")
 
 WATCHLIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "PAXGUSDT"]
 
@@ -16,13 +17,12 @@ def send_telegram_msg(msg: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
     try:
-        requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json=payload, timeout=10)
+        print(f"[Telegram] Sent status: {r.status_code}")
     except Exception as e:
         print(f"[Telegram Error] {e}")
 
 class PrecisionSniperBrain:
-    """محرك تحليلي متقدم يدمج RSI والمتوسطات المتحركة ونبض السيولة"""
-    
     def get_klines(self, symbol, interval="15m", limit=35):
         url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
         try:
@@ -76,24 +76,23 @@ class PrecisionSniperBrain:
             vol_avg = sum(volumes[-10:]) / 10
             vol_spike = volumes[-1] > (vol_avg * 1.3)
 
-            status_note = f"{symbol}: ${current_price:,.2f} | RSI: {rsi:.1f}"
-            market_intel.append(status_note)
+            market_intel.append(f"{symbol}: ${current_price:,.2f} | RSI: {rsi:.1f}")
 
-            # --- استراتيجية القناص 1: ارتداد من تشبع بيعي حاد مع دخول سيولة ---
+            # 1. ارتداد من تشبع بيعي حاد
             if rsi < 32 and current_price > closes[-2]:
                 opportunities.append({
                     "asset": symbol,
                     "direction": "BUY",
-                    "catalyst": f"🎯 قنص تشبع بيعي عميق (RSI={rsi:.1f}) مع ارتداد وانعكاس إيجابي",
+                    "catalyst": f"🎯 قنص تشبع بيعي عميق (RSI={rsi:.1f}) مع ارتداد",
                     "weight": 0.12
                 })
 
-            # --- استراتيجية القناص 2: اختراق ذهبي مع انفجار حجم التداول ---
+            # 2. اختراق صاعد مع سيولة حيتان
             elif ema_fast > ema_slow and closes[-2] <= ema_slow and vol_spike and rsi > 52:
                 opportunities.append({
                     "asset": symbol,
                     "direction": "BUY",
-                    "catalyst": f"⚡ اختراق تريند مؤسسي صاعد مدعوم بحجم تداول ضخم (RSI={rsi:.1f})",
+                    "catalyst": f"⚡ اختراق تريند مؤسسي صاعد مع سيولة قوية (RSI={rsi:.1f})",
                     "weight": 0.15
                 })
 
@@ -101,7 +100,7 @@ class PrecisionSniperBrain:
 
 def bot_worker_loop():
     time.sleep(5)
-    send_telegram_msg("🧠 تم تفعيل عقلية القناص الذكي (Precision Sniper AI)!\nالوضع: فلترة عميقة للفرص عالية الاحتمالية والربح السريع فقط.")
+    send_telegram_msg("🚀 تم استعادة الاتصال وتفعيل محرك القناص المؤسسي الذكي!\nالبوت الآن يتربص بالفرص عالية الدقة وسيرسل التقرير الفني بانتظام.")
 
     try:
         engine = LivePaperEngine(initial_balance=100.0)
@@ -114,12 +113,11 @@ def bot_worker_loop():
 
     while True:
         try:
-            # 1. متابعة الصفقات وجني الأرباح فور الوصول للهدف
+            # 1. متابعة الصفقات المفتوحة
             engine.check_open_positions(send_telegram_msg)
 
-            # 2. فحص قناص فائق الدقة
+            # 2. البحث عن صفقات دقيقة
             setups, intel = sniper.scan_sniper_setups()
-
             for setup in setups:
                 engine.execute_simulated_trade(
                     asset=setup["asset"],
@@ -128,16 +126,16 @@ def bot_worker_loop():
                     notifier=send_telegram_msg
                 )
 
-            # 3. تقرير دوري ذكي كل 30 دقيقة لطمأنتك ومتابعة التحليل
+            # 3. تقرير دوري كل 30 دقيقة
             loop_count += 1
             if loop_count % 30 == 0:
                 summary_text = "\n".join([f"• {line}" for line in intel])
                 send_telegram_msg(
-                    f"🎯 تقرير القناص الدوري (رصد السوق):\n"
-                    f"السيولة المتاحة: ${engine.balance:.2f}\n"
+                    f"🎯 تقرير القناص الدوري:\n"
+                    f"السيولة: ${engine.balance:.2f}\n"
                     f"الصفقات المفتوحة: {len(engine.open_positions)}\n\n"
-                    f"📈 مؤشرات الأصول الحالية:\n{summary_text}\n\n"
-                    f"الحالة: في وضع التربص لاقتناص الفرص عالية الدقة."
+                    f"📊 نبض السوق:\n{summary_text}\n\n"
+                    f"الحالة: قيد المراقبة اللحظية 24/7."
                 )
 
             time.sleep(60)
