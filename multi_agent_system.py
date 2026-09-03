@@ -11,6 +11,8 @@ app = Flask(__name__)
 TELEGRAM_BOT_TOKEN = "7950965005:AAEUhM4c_UqF_XQkF50xQG9Z-0P0kS_qf84"
 TELEGRAM_CHAT_ID = "6176503816"
 
+WATCHLIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "PAXGUSDT"]
+
 NEWS_FEEDS = [
     "https://feeds.content.dowjones.io/public/rss/mw_topstories",
     "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines",
@@ -26,6 +28,46 @@ def send_telegram_msg(msg: str):
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"Telegram error: {e}")
+
+class TechnicalMarketScanner:
+    """محرك فني يفحص الأسعار والزخم للدخول في صفقات يومية وسريعة"""
+    def get_market_data(self, symbol):
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=20"
+        try:
+            res = requests.get(url, timeout=5).json()
+            closes = [float(candle[4]) for candle in res]
+            return closes
+        except Exception:
+            return []
+
+    def scan_for_setups(self):
+        signals = []
+        for symbol in WATCHLIST:
+            prices = self.get_market_data(symbol)
+            if len(prices) < 15:
+                continue
+            
+            current_price = prices[-1]
+            prev_price = prices[-5]
+            change_pct = ((current_price - prev_price) / prev_price) * 100
+
+            # استراتيجية الزخم اللحظي واختراق المدى السعري
+            if change_pct > 0.4:
+                signals.append({
+                    "asset": symbol,
+                    "direction": "BUY",
+                    "catalyst": f"زخم فني صاعد سريع (+{change_pct:.2f}%) على فريم 15 دقيقة",
+                    "weight": 0.15
+                })
+            elif change_pct < -1.2:
+                # ارتداد من تشبع بيعي
+                signals.append({
+                    "asset": symbol,
+                    "direction": "BUY",
+                    "catalyst": f"اقتناص ارتداد سعري بعد هبوط مؤقت ({change_pct:.2f}%)",
+                    "weight": 0.12
+                })
+        return signals
 
 class GlobalMacroResearcher:
     def __init__(self):
@@ -49,47 +91,64 @@ class MasterMacroBrain:
     def analyze_opportunities(self, events):
         signals = []
         for text in events:
-            if any(w in text for w in ["war", "conflict", "crisis", "bank collapse", "inflation surge", "escalation", "tensions"]):
-                signals.append({"asset": "PAXGUSDT", "direction": "BUY", "catalyst": "ملاذ آمن / توترات واضطرابات كبرى", "weight": 0.20})
-                signals.append({"asset": "BTCUSDT", "direction": "BUY", "catalyst": "تحوط ضد النظام المالي والسيولة", "weight": 0.15})
-            elif any(w in text for w in ["rate cut", "fed eases", "liquidity", "stimulus", "bullish", "rally", "growth"]):
-                signals.append({"asset": "ETHUSDT", "direction": "BUY", "catalyst": "توسع السيولة العالمية وأصول المخاطرة", "weight": 0.15})
-                signals.append({"asset": "SOLUSDT", "direction": "BUY", "catalyst": "زخم المضاربة السريعة والتوسع التقني", "weight": 0.15})
-                signals.append({"asset": "BTCUSDT", "direction": "BUY", "catalyst": "انخفاض الفائدة وضعف مؤشر الدولار", "weight": 0.20})
-            elif any(w in text for w in ["oil spike", "energy shortage", "sanctions", "trade war"]):
-                signals.append({"asset": "PAXGUSDT", "direction": "BUY", "catalyst": "صدمة تضخم سلع وطاقة", "weight": 0.15})
+            if any(w in text for w in ["war", "crisis", "bank", "inflation", "tensions", "oil", "gold"]):
+                signals.append({"asset": "PAXGUSDT", "direction": "BUY", "catalyst": "تحوط كلي / توترات واضطرابات", "weight": 0.15})
+                signals.append({"asset": "BTCUSDT", "direction": "BUY", "catalyst": "طلب سيولة وتحوط", "weight": 0.15})
+            elif any(w in text for w in ["rate cut", "fed", "stimulus", "rally", "crypto", "surge", "gain"]):
+                signals.append({"asset": "ETHUSDT", "direction": "BUY", "catalyst": "شهية مخاطرة وتوسع سيولة", "weight": 0.15})
+                signals.append({"asset": "SOLUSDT", "direction": "BUY", "catalyst": "تسارع مضاربي على العملات البديلة", "weight": 0.15})
         return signals
 
 def bot_worker_loop():
     engine = LivePaperEngine(initial_balance=100.0)
     researcher = GlobalMacroResearcher()
     brain = MasterMacroBrain()
+    scanner = TechnicalMarketScanner()
 
-    send_telegram_msg("🟢 السيرفر الحي نشط الآن ومحمي من السكون 24/7.")
+    send_telegram_msg("🚀 تم تفعيل المحرك الهجومي النشط!\nالنظام الآن يضارب فنياً وإخبارياً على مدار اليوم والساعة.")
 
+    loop_count = 0
     while True:
         try:
+            # فحص الصفقات المفتوحة وأهداف الربح
             engine.check_open_positions(send_telegram_msg)
+
+            # 1. فحص فني لحظي للأسعار (يعمل دائماً حتى بدون أخبار)
+            tech_signals = scanner.scan_for_setups()
+            for sig in tech_signals:
+                engine.execute_simulated_trade(
+                    asset=sig["asset"],
+                    weight=sig["weight"],
+                    catalyst=sig["catalyst"],
+                    notifier=send_telegram_msg
+                )
+
+            # 2. فحص إخباري عالمي
             events = researcher.scan_world_events()
             if events:
-                opportunities = brain.analyze_opportunities(events)
-                for opp in opportunities:
+                news_signals = brain.analyze_opportunities(events)
+                for sig in news_signals:
                     engine.execute_simulated_trade(
-                        asset=opp["asset"],
-                        weight=opp["weight"],
-                        catalyst=opp["catalyst"],
+                        asset=sig["asset"],
+                        weight=sig["weight"],
+                        catalyst=sig["catalyst"],
                         notifier=send_telegram_msg
                     )
+
+            # إرسال تقرير حالة كل 4 ساعات (كل 240 دورة دقيقة)
+            loop_count += 1
+            if loop_count % 240 == 0:
+                send_telegram_msg(f"📊 تقرير دوري:\nالبوت نشط ويعمل في مراقبة الأسواق.\nالرصيد المتاح: ${engine.balance:.2f}\nعدد الصفقات المفتوحة: {len(engine.open_positions)}")
+
             time.sleep(60)
         except Exception as e:
-            print(f"Loop Error: {e}")
+            print(f"Engine Loop Error: {e}")
             time.sleep(60)
 
 @app.route('/')
 def home():
-    return "Bot is running live 24/7!", 200
+    return "Active Scalper Bot Running 24/7", 200
 
-# تشغيل حلقة التداول في مسار منفصل خلف خادم الويب
 worker_thread = threading.Thread(target=bot_worker_loop, daemon=True)
 worker_thread.start()
 
