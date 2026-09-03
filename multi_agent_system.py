@@ -7,9 +7,8 @@ from live_simulator import LivePaperEngine
 
 app = Flask(__name__)
 
-# استخدام متغير البيئة إن وجد أو التوكن المباشر
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8849431477:AAGVNZett1gWBikPg6fWJ4p2CJhQJxWEaaw")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "6176503816")
+TELEGRAM_BOT_TOKEN = "8849431477:AAGVNZett1gWBikPg6fWJ4p2CJhQJxWEaaw"
+TELEGRAM_CHAT_ID = "7106069536"
 
 WATCHLIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "PAXGUSDT"]
 
@@ -18,7 +17,7 @@ def send_telegram_msg(msg: str):
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
     try:
         r = requests.post(url, json=payload, timeout=10)
-        print(f"[Telegram] Sent status: {r.status_code}")
+        print(f"[Telegram] Sent: {r.status_code}")
     except Exception as e:
         print(f"[Telegram Error] {e}")
 
@@ -28,12 +27,11 @@ class PrecisionSniperBrain:
         try:
             res = requests.get(url, timeout=6).json()
             closes = [float(k[4]) for k in res]
-            highs = [float(k[2]) for k in res]
-            lows = [float(k[3]) for k in res]
             volumes = [float(k[5]) for k in res]
-            return closes, highs, lows, volumes
-        except Exception:
-            return [], [], [], []
+            return closes, volumes
+        except Exception as e:
+            print(f"[Binance Error {symbol}] {e}")
+            return [], []
 
     def calculate_rsi(self, prices, period=14):
         if len(prices) < period + 1:
@@ -43,7 +41,6 @@ class PrecisionSniperBrain:
             diff = prices[i] - prices[i - 1]
             gains.append(diff if diff > 0 else 0)
             losses.append(abs(diff) if diff < 0 else 0)
-        
         avg_gain = sum(gains[-period:]) / period
         avg_loss = sum(losses[-period:]) / period
         if avg_loss == 0:
@@ -56,56 +53,51 @@ class PrecisionSniperBrain:
             return prices[-1]
         k = 2 / (period + 1)
         ema = prices[0]
-        for price in prices[1:]:
-            ema = (price * k) + (ema * (1 - k))
+        for p in prices[1:]:
+            ema = (p * k) + (ema * (1 - k))
         return ema
 
     def scan_sniper_setups(self):
         opportunities = []
         market_intel = []
-
         for symbol in WATCHLIST:
-            closes, highs, lows, volumes = self.get_klines(symbol)
-            if len(closes) < 25:
+            closes, volumes = self.get_klines(symbol)
+            if len(closes) < 20:
                 continue
-
             current_price = closes[-1]
             rsi = self.calculate_rsi(closes, period=14)
             ema_fast = self.calculate_ema(closes, period=9)
             ema_slow = self.calculate_ema(closes, period=21)
-            vol_avg = sum(volumes[-10:]) / 10
-            vol_spike = volumes[-1] > (vol_avg * 1.3)
+            vol_avg = sum(volumes[-10:]) / 10 if volumes else 1.0
+            vol_spike = volumes[-1] > (vol_avg * 1.2) if volumes else False
 
-            market_intel.append(f"{symbol}: ${current_price:,.2f} | RSI: {rsi:.1f}")
+            market_intel.append(f"{symbol}: ${current_price:,.2f} (RSI: {rsi:.1f})")
 
-            # 1. ارتداد من تشبع بيعي حاد
-            if rsi < 32 and current_price > closes[-2]:
+            # شروط القناص الذكي الدقيقة
+            if rsi < 35 and current_price > closes[-2]:
                 opportunities.append({
                     "asset": symbol,
                     "direction": "BUY",
-                    "catalyst": f"🎯 قنص تشبع بيعي عميق (RSI={rsi:.1f}) مع ارتداد",
+                    "catalyst": f"🎯 اقتناص ارتداد وتشبع بيعي قوي (RSI={rsi:.1f})",
                     "weight": 0.12
                 })
-
-            # 2. اختراق صاعد مع سيولة حيتان
-            elif ema_fast > ema_slow and closes[-2] <= ema_slow and vol_spike and rsi > 52:
+            elif ema_fast > ema_slow and closes[-2] <= ema_slow and (vol_spike or rsi > 50):
                 opportunities.append({
                     "asset": symbol,
                     "direction": "BUY",
-                    "catalyst": f"⚡ اختراق تريند مؤسسي صاعد مع سيولة قوية (RSI={rsi:.1f})",
+                    "catalyst": f"⚡ اختراق صاعد مؤسسي مع سيولة قوية (RSI={rsi:.1f})",
                     "weight": 0.15
                 })
-
         return opportunities, market_intel
 
-def bot_worker_loop():
-    time.sleep(5)
-    send_telegram_msg("🚀 تم استعادة الاتصال وتفعيل محرك القناص المؤسسي الذكي!\nالبوت الآن يتربص بالفرص عالية الدقة وسيرسل التقرير الفني بانتظام.")
+def run_trader():
+    time.sleep(3)
+    send_telegram_msg("🟢 تم ربط البوت بنجاح تام!\nمحرك القناص الذكي يعمل الآن ويراقب السوق 24/7.")
 
     try:
         engine = LivePaperEngine(initial_balance=100.0)
     except Exception as e:
-        print(f"[Init Error] {e}")
+        print(f"Error in LivePaperEngine: {e}")
         return
 
     sniper = PrecisionSniperBrain()
@@ -113,10 +105,7 @@ def bot_worker_loop():
 
     while True:
         try:
-            # 1. متابعة الصفقات المفتوحة
             engine.check_open_positions(send_telegram_msg)
-
-            # 2. البحث عن صفقات دقيقة
             setups, intel = sniper.scan_sniper_setups()
             for setup in setups:
                 engine.execute_simulated_trade(
@@ -126,29 +115,26 @@ def bot_worker_loop():
                     notifier=send_telegram_msg
                 )
 
-            # 3. تقرير دوري كل 30 دقيقة
             loop_count += 1
             if loop_count % 30 == 0:
-                summary_text = "\n".join([f"• {line}" for line in intel])
+                text = "\n".join([f"• {x}" for x in intel])
                 send_telegram_msg(
-                    f"🎯 تقرير القناص الدوري:\n"
-                    f"السيولة: ${engine.balance:.2f}\n"
+                    f"🎯 تقرير القناص (كل 30 دقيقة):\n"
+                    f"الرصيد المتاح: ${engine.balance:.2f}\n"
                     f"الصفقات المفتوحة: {len(engine.open_positions)}\n\n"
-                    f"📊 نبض السوق:\n{summary_text}\n\n"
-                    f"الحالة: قيد المراقبة اللحظية 24/7."
+                    f"📊 نبض الأسواق:\n{text}"
                 )
+            time.sleep(60)
+        except Exception as err:
+            print(f"Worker Loop Error: {err}")
+            time.sleep(60)
 
-            time.sleep(60)
-        except Exception as e:
-            print(f"[Loop Exception] {e}")
-            time.sleep(60)
+trader_thread = threading.Thread(target=run_trader, daemon=True)
+trader_thread.start()
 
 @app.route('/')
 def home():
     return "Institutional Sniper AI Active 24/7", 200
-
-worker_thread = threading.Thread(target=bot_worker_loop, daemon=True)
-worker_thread.start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
