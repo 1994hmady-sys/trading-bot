@@ -8,7 +8,8 @@ app = Flask(__name__)
 
 TELEGRAM_BOT_TOKEN = "8849431477:AAGVNZett1gWBikPg6fWJ4p2CJhQJxWEaaw"
 TELEGRAM_CHAT_ID = "7106069536"
-WATCHLIST = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "PAXG/USDT"]
+# تم استبدال PAXG بعملة BNB المتاحة في MEXC
+WATCHLIST = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
 
 def send_telegram_msg(msg: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -20,7 +21,6 @@ def send_telegram_msg(msg: str):
 
 class PrecisionSniperBrain:
     def __init__(self):
-        # وداعاً لحظر باينانس! سحب البيانات الآن يتم عبر منصة MEXC العالمية
         self.exchange = ccxt.mexc({
             'enableRateLimit': True,
             'options': {
