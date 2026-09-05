@@ -19,13 +19,13 @@ def send_telegram_msg(msg: str):
 
 class PrecisionSniperBrain:
     def get_klines(self, symbol, interval="15m", limit=35):
-        # إضافة روابط باينانس بديلة لتفادي الحظر
-        endpoints = ["api.binance.com", "api1.binance.com", "api2.binance.com", "api3.binance.com"]
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        # استخدام النطاق المفتوح المخصص لتجاوز الحظر الأمريكي
+        endpoints = ["data-api.binance.vision", "api.binance.com"]
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         for ep in endpoints:
             url = f"https://{ep}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
             try:
-                res = requests.get(url, headers=headers, timeout=5)
+                res = requests.get(url, headers=headers, timeout=7)
                 if res.status_code == 200:
                     data = res.json()
                     closes = [float(k[4]) for k in data]
@@ -62,7 +62,7 @@ class PrecisionSniperBrain:
         for symbol in WATCHLIST:
             closes, volumes = self.get_klines(symbol)
             if len(closes) < 20:
-                market_intel.append(f"⚠️ {symbol}: فشل جلب بيانات باينانس")
+                market_intel.append(f"⚠️ {symbol}: فشل جلب بيانات باينانس (حظر السيرفر)")
                 continue
             
             current_price = closes[-1]
