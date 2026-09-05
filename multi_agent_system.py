@@ -14,19 +14,26 @@ def send_telegram_msg(msg: str):
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": msg}
     try:
         requests.post(url, json=payload, timeout=5)
-    except Exception:
+    except:
         pass
 
 class PrecisionSniperBrain:
     def get_klines(self, symbol, interval="15m", limit=35):
-        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-        try:
-            res = requests.get(url, timeout=5).json()
-            closes = [float(k[4]) for k in res]
-            volumes = [float(k[5]) for k in res]
-            return closes, volumes
-        except Exception:
-            return [], []
+        # إضافة روابط باينانس بديلة لتفادي الحظر
+        endpoints = ["api.binance.com", "api1.binance.com", "api2.binance.com", "api3.binance.com"]
+        headers = {'User-Agent': 'Mozilla/5.0'}
+        for ep in endpoints:
+            url = f"https://{ep}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+            try:
+                res = requests.get(url, headers=headers, timeout=5)
+                if res.status_code == 200:
+                    data = res.json()
+                    closes = [float(k[4]) for k in data]
+                    volumes = [float(k[5]) for k in data]
+                    return closes, volumes
+            except:
+                continue
+        return [], []
 
     def calculate_rsi(self, prices, period=14):
         if len(prices) < period + 1: return 50.0
@@ -54,7 +61,9 @@ class PrecisionSniperBrain:
         market_intel = []
         for symbol in WATCHLIST:
             closes, volumes = self.get_klines(symbol)
-            if len(closes) < 20: continue
+            if len(closes) < 20:
+                market_intel.append(f"⚠️ {symbol}: فشل جلب بيانات باينانس")
+                continue
             
             current_price = closes[-1]
             rsi = self.calculate_rsi(closes, period=14)
@@ -63,17 +72,17 @@ class PrecisionSniperBrain:
             vol_avg = sum(volumes[-10:]) / 10 if volumes else 1.0
             vol_spike = volumes[-1] > (vol_avg * 1.2) if volumes else False
 
-            market_intel.append(f"{symbol}: ${current_price:,.2f} (RSI: {rsi:.1f})")
+            market_intel.append(f"🔹 {symbol}: ${current_price:,.2f} (RSI: {rsi:.1f})")
 
             if rsi < 35 and current_price > closes[-2]:
                 opportunities.append({
                     "asset": symbol, "direction": "BUY",
-                    "catalyst": f"🎯 اقتناص ارتداد (RSI={rsi:.1f})", "weight": 0.12
+                    "catalyst": f"🎯 ارتداد وتشبع بيعي (RSI={rsi:.1f})", "weight": 0.12
                 })
             elif ema_fast > ema_slow and closes[-2] <= ema_slow and (vol_spike or rsi > 50):
                 opportunities.append({
                     "asset": symbol, "direction": "BUY",
-                    "catalyst": f"⚡ اختراق صاعد (RSI={rsi:.1f})", "weight": 0.15
+                    "catalyst": f"⚡ اختراق صاعد للتريند (RSI={rsi:.1f})", "weight": 0.15
                 })
         return opportunities, market_intel
 
@@ -91,7 +100,6 @@ def home():
     if not engine: return "Engine Error", 500
 
     try:
-        # حماية من الخطأ: التأكد من وجود الدالة قبل استدعائها
         if hasattr(engine, 'check_open_positions'):
             engine.check_open_positions(send_telegram_msg)
         elif hasattr(engine, 'update_positions'):
@@ -107,8 +115,9 @@ def home():
 
         ping_count += 1
         if ping_count % 6 == 0:
-            text = "\n".join([f"• {x}" for x in intel])
-            # حماية قراءة الرصيد
+            text = "\n".join([f"{x}" for x in intel])
+            if not text.strip(): text = "لا توجد بيانات متاحة حالياً"
+            
             bal = engine.balance if hasattr(engine, 'balance') else 100.0
             pos_len = len(engine.open_positions) if hasattr(engine, 'open_positions') else 0
             
