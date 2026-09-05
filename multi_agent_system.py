@@ -77,7 +77,6 @@ class PrecisionSniperBrain:
                 })
         return opportunities, market_intel
 
-# تهيئة المحرك لمرة واحدة ليحتفظ بالرصيد
 try:
     engine = LivePaperEngine(initial_balance=100.0)
 except Exception:
@@ -89,38 +88,41 @@ ping_count = 0
 @app.route('/')
 def home():
     global ping_count, engine
-    if not engine:
-        return "Engine Error", 500
+    if not engine: return "Engine Error", 500
 
     try:
-        # 1. فحص الصفقات المفتوحة
-        engine.check_open_positions(send_telegram_msg)
+        # حماية من الخطأ: التأكد من وجود الدالة قبل استدعائها
+        if hasattr(engine, 'check_open_positions'):
+            engine.check_open_positions(send_telegram_msg)
+        elif hasattr(engine, 'update_positions'):
+            engine.update_positions(send_telegram_msg)
 
-        # 2. فحص الأسواق
         setups, intel = sniper.scan_sniper_setups()
         for setup in setups:
-            engine.execute_simulated_trade(
-                asset=setup["asset"], weight=setup["weight"],
-                catalyst=setup["catalyst"], notifier=send_telegram_msg
-            )
+            if hasattr(engine, 'execute_simulated_trade'):
+                engine.execute_simulated_trade(
+                    asset=setup["asset"], weight=setup["weight"],
+                    catalyst=setup["catalyst"], notifier=send_telegram_msg
+                )
 
-        # 3. تقرير دوري (UptimeRobot يزور الموقع كل 5 دقائق، 6 زيارات = 30 دقيقة تقريباً)
         ping_count += 1
         if ping_count % 6 == 0:
             text = "\n".join([f"• {x}" for x in intel])
+            # حماية قراءة الرصيد
+            bal = engine.balance if hasattr(engine, 'balance') else 100.0
+            pos_len = len(engine.open_positions) if hasattr(engine, 'open_positions') else 0
+            
             send_telegram_msg(
                 f"⏱️ تقرير القناص (كل 30 دقيقة):\n"
-                f"الرصيد: ${engine.balance:.2f}\n"
-                f"الصفقات المفتوحة: {len(engine.open_positions)}\n\n"
+                f"الرصيد: ${bal:.2f}\n"
+                f"الصفقات المفتوحة: {pos_len}\n\n"
                 f"📊 نبض الأسواق:\n{text}"
             )
-
-        return "Trader Tick Executed Successfully", 200
+        return "OK", 200
     except Exception as e:
-        send_telegram_msg(f"⚠️ خطأ في السيرفر: {str(e)}")
-        return str(e), 500
+        send_telegram_msg(f"⚠️ خطأ غير متوقع: {str(e)}")
+        return "Error", 500
 
 if __name__ == "__main__":
-    send_telegram_msg("🟢 تم تحديث النظام! البوت الآن مرتبط بنبض UptimeRobot ولن يتوقف أبداً.")
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
