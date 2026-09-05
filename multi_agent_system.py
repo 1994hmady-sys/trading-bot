@@ -1,5 +1,6 @@
 import os
 import requests
+import ccxt
 from flask import Flask
 from live_simulator import LivePaperEngine
 
@@ -7,7 +8,7 @@ app = Flask(__name__)
 
 TELEGRAM_BOT_TOKEN = "8849431477:AAGVNZett1gWBikPg6fWJ4p2CJhQJxWEaaw"
 TELEGRAM_CHAT_ID = "7106069536"
-WATCHLIST = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "PAXGUSDT"]
+WATCHLIST = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "PAXG/USDT"] # ccxt يستخدم هذه الصيغة
 
 def send_telegram_msg(msg: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -18,22 +19,27 @@ def send_telegram_msg(msg: str):
         pass
 
 class PrecisionSniperBrain:
-    def get_klines(self, symbol, interval="15m", limit=35):
-        # استخدام النطاق المفتوح المخصص لتجاوز الحظر الأمريكي
-        endpoints = ["data-api.binance.vision", "api.binance.com"]
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        for ep in endpoints:
-            url = f"https://{ep}/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-            try:
-                res = requests.get(url, headers=headers, timeout=7)
-                if res.status_code == 200:
-                    data = res.json()
-                    closes = [float(k[4]) for k in data]
-                    volumes = [float(k[5]) for k in data]
-                    return closes, volumes
-            except:
-                continue
-        return [], []
+    def __init__(self):
+        # تهيئة بورصة Binance عبر ccxt مع تفعيل Rate Limit
+        self.exchange = ccxt.binance({
+            'enableRateLimit': True,
+            'options': {
+                'defaultType': 'spot', # التداول الفوري
+            }
+        })
+
+    def get_klines(self, symbol, timeframe="15m", limit=35):
+        try:
+            # جلب الشموع (OHLCV)
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            if not ohlcv: return [], []
+            
+            closes = [float(candle[4]) for candle in ohlcv]
+            volumes = [float(candle[5]) for candle in ohlcv]
+            return closes, volumes
+        except Exception as e:
+            print(f"CCXT Error for {symbol}: {e}")
+            return [], []
 
     def calculate_rsi(self, prices, period=14):
         if len(prices) < period + 1: return 50.0
@@ -60,9 +66,12 @@ class PrecisionSniperBrain:
         opportunities = []
         market_intel = []
         for symbol in WATCHLIST:
+            # CCXT يستخدم BTC/USDT، نحتاج تحويلها لـ BTCUSDT للمحفظة التجريبية
+            clean_symbol = symbol.replace("/", "")
             closes, volumes = self.get_klines(symbol)
+            
             if len(closes) < 20:
-                market_intel.append(f"⚠️ {symbol}: فشل جلب بيانات باينانس (حظر السيرفر)")
+                market_intel.append(f"⚠️ {clean_symbol}: فشل جلب البيانات (عبر CCXT)")
                 continue
             
             current_price = closes[-1]
@@ -72,16 +81,16 @@ class PrecisionSniperBrain:
             vol_avg = sum(volumes[-10:]) / 10 if volumes else 1.0
             vol_spike = volumes[-1] > (vol_avg * 1.2) if volumes else False
 
-            market_intel.append(f"🔹 {symbol}: ${current_price:,.2f} (RSI: {rsi:.1f})")
+            market_intel.append(f"🔹 {clean_symbol}: ${current_price:,.2f} (RSI: {rsi:.1f})")
 
             if rsi < 35 and current_price > closes[-2]:
                 opportunities.append({
-                    "asset": symbol, "direction": "BUY",
+                    "asset": clean_symbol, "direction": "BUY",
                     "catalyst": f"🎯 ارتداد وتشبع بيعي (RSI={rsi:.1f})", "weight": 0.12
                 })
             elif ema_fast > ema_slow and closes[-2] <= ema_slow and (vol_spike or rsi > 50):
                 opportunities.append({
-                    "asset": symbol, "direction": "BUY",
+                    "asset": clean_symbol, "direction": "BUY",
                     "catalyst": f"⚡ اختراق صاعد للتريند (RSI={rsi:.1f})", "weight": 0.15
                 })
         return opportunities, market_intel
