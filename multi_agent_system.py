@@ -8,7 +8,7 @@ app = Flask(__name__)
 
 TELEGRAM_BOT_TOKEN = "8849431477:AAGVNZett1gWBikPg6fWJ4p2CJhQJxWEaaw"
 TELEGRAM_CHAT_ID = "7106069536"
-WATCHLIST = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "PAXG/USDT"] # ccxt يستخدم هذه الصيغة
+WATCHLIST = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "PAXG/USDT"]
 
 def send_telegram_msg(msg: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -20,20 +20,18 @@ def send_telegram_msg(msg: str):
 
 class PrecisionSniperBrain:
     def __init__(self):
-        # تهيئة بورصة Binance عبر ccxt مع تفعيل Rate Limit
-        self.exchange = ccxt.binance({
+        # وداعاً لحظر باينانس! سحب البيانات الآن يتم عبر منصة MEXC العالمية
+        self.exchange = ccxt.mexc({
             'enableRateLimit': True,
             'options': {
-                'defaultType': 'spot', # التداول الفوري
+                'defaultType': 'spot',
             }
         })
 
     def get_klines(self, symbol, timeframe="15m", limit=35):
         try:
-            # جلب الشموع (OHLCV)
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
             if not ohlcv: return [], []
-            
             closes = [float(candle[4]) for candle in ohlcv]
             volumes = [float(candle[5]) for candle in ohlcv]
             return closes, volumes
@@ -66,12 +64,11 @@ class PrecisionSniperBrain:
         opportunities = []
         market_intel = []
         for symbol in WATCHLIST:
-            # CCXT يستخدم BTC/USDT، نحتاج تحويلها لـ BTCUSDT للمحفظة التجريبية
             clean_symbol = symbol.replace("/", "")
             closes, volumes = self.get_klines(symbol)
             
             if len(closes) < 20:
-                market_intel.append(f"⚠️ {clean_symbol}: فشل جلب البيانات (عبر CCXT)")
+                market_intel.append(f"⚠️ {clean_symbol}: فشل جلب البيانات")
                 continue
             
             current_price = closes[-1]
