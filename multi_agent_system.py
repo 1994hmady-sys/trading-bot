@@ -8,7 +8,6 @@ app = Flask(__name__)
 
 TELEGRAM_BOT_TOKEN = "8849431477:AAGVNZett1gWBikPg6fWJ4p2CJhQJxWEaaw"
 TELEGRAM_CHAT_ID = "7106069536"
-# تم استبدال PAXG بعملة BNB المتاحة في MEXC
 WATCHLIST = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
 
 def send_telegram_msg(msg: str):
@@ -28,7 +27,7 @@ class PrecisionSniperBrain:
             }
         })
 
-    def get_klines(self, symbol, timeframe="15m", limit=35):
+    def get_klines(self, symbol, timeframe="5m", limit=35): # تم التحويل إلى 5 دقائق لسرعة الصفقات
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
             if not ohlcv: return [], []
@@ -36,7 +35,6 @@ class PrecisionSniperBrain:
             volumes = [float(candle[5]) for candle in ohlcv]
             return closes, volumes
         except Exception as e:
-            print(f"CCXT Error for {symbol}: {e}")
             return [], []
 
     def calculate_rsi(self, prices, period=14):
@@ -73,22 +71,22 @@ class PrecisionSniperBrain:
             
             current_price = closes[-1]
             rsi = self.calculate_rsi(closes, period=14)
-            ema_fast = self.calculate_ema(closes, period=9)
-            ema_slow = self.calculate_ema(closes, period=21)
-            vol_avg = sum(volumes[-10:]) / 10 if volumes else 1.0
-            vol_spike = volumes[-1] > (vol_avg * 1.2) if volumes else False
+            # متوسطات متحركة أسرع بكثير (5 و 15) للمضاربة
+            ema_fast = self.calculate_ema(closes, period=5)
+            ema_slow = self.calculate_ema(closes, period=15)
 
             market_intel.append(f"🔹 {clean_symbol}: ${current_price:,.2f} (RSI: {rsi:.1f})")
 
-            if rsi < 35 and current_price > closes[-2]:
+            # شروط الدخول السريع (المضاربة)
+            if rsi < 45:
                 opportunities.append({
                     "asset": clean_symbol, "direction": "BUY",
-                    "catalyst": f"🎯 ارتداد وتشبع بيعي (RSI={rsi:.1f})", "weight": 0.12
+                    "catalyst": f"⚡ شراء مضاربة (RSI={rsi:.1f})", "weight": 0.15
                 })
-            elif ema_fast > ema_slow and closes[-2] <= ema_slow and (vol_spike or rsi > 50):
+            elif ema_fast > ema_slow and closes[-2] <= ema_slow:
                 opportunities.append({
                     "asset": clean_symbol, "direction": "BUY",
-                    "catalyst": f"⚡ اختراق صاعد للتريند (RSI={rsi:.1f})", "weight": 0.15
+                    "catalyst": f"📈 تقاطع سريع صاعد", "weight": 0.15
                 })
         return opportunities, market_intel
 
@@ -128,10 +126,10 @@ def home():
             pos_len = len(engine.open_positions) if hasattr(engine, 'open_positions') else 0
             
             send_telegram_msg(
-                f"⏱️ تقرير القناص (كل 30 دقيقة):\n"
+                f"⏱️ تقرير المضارب (كل 30 دقيقة):\n"
                 f"الرصيد: ${bal:.2f}\n"
                 f"الصفقات المفتوحة: {pos_len}\n\n"
-                f"📊 نبض الأسواق:\n{text}"
+                f"📊 نبض الأسواق (على فريم 5 دقائق):\n{text}"
             )
         return "OK", 200
     except Exception as e:
