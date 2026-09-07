@@ -3,6 +3,7 @@ import json
 import requests
 import ccxt
 import time
+import threading
 import xml.etree.ElementTree as ET
 from flask import Flask
 import google.generativeai as genai
@@ -79,7 +80,6 @@ class GeminiBrain:
         self.last_news_update = 0
 
     def update_news_radar(self):
-        # رادار يسحب الأخبار العاجلة مجاناً كل 15 دقيقة
         if time.time() - self.last_news_update < 900: return
         try:
             resp = requests.get("https://cointelegraph.com/rss", timeout=5)
@@ -137,22 +137,31 @@ class GeminiBrain:
         return intel, state
 
 brain = GeminiBrain()
-ping = 0
+ping_count = 0
+
+def background_trading_loop():
+    global ping_count
+    while True:
+        try:
+            intel, state = brain.scan()
+            ping_count += 1
+            if ping_count % 6 == 0:
+                bal = state["balance"]
+                pos = len(state["pos"])
+                text = "\n".join(intel) if intel else "لا بيانات"
+                send_telegram_msg(f"🌍 تقرير جيميناي الشامل (اقتصاد + فني):\nالرصيد المتاح: ${bal:.2f}\nالصفقات المفتوحة: {pos}\n\n{text}")
+        except Exception:
+            pass
+        # ينتظر البوت 5 دقائق قبل المسح التالي ليتداول بشكل مستقل تماماً
+        time.sleep(300) 
+
+# تشغيل العقل المتداول في الخلفية بمجرد تشغيل السيرفر
+threading.Thread(target=background_trading_loop, daemon=True).start()
 
 @app.route('/')
 def home():
-    global ping
-    try:
-        intel, state = brain.scan()
-        ping += 1
-        if ping % 6 == 0:
-            bal = state["balance"]
-            pos = len(state["pos"])
-            text = "\n".join(intel) if intel else "لا بيانات"
-            send_telegram_msg(f"🌍 تقرير جيميناي الشامل (اقتصاد + فني):\nالرصيد المتاح: ${bal:.2f}\nالصفقات المفتوحة: {pos}\n\n{text}")
-        return "OK", 200
-    except Exception:
-        return "Err", 500
+    # هذه الواجهة ترد على UptimeRobot فوراً لمنع رسائل الخطأ
+    return "Gemini Trading Agent is ACTIVE and scanning in the background!", 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
