@@ -2,16 +2,21 @@ import os
 import json
 import requests
 import ccxt
+import time
+import xml.etree.ElementTree as ET
 from flask import Flask
+import google.generativeai as genai
 
 app = Flask(__name__)
 
 TELEGRAM_BOT_TOKEN = "8849431477:AAGVNZett1gWBikPg6fWJ4p2CJhQJxWEaaw"
 TELEGRAM_CHAT_ID = "7106069536"
+GEMINI_API_KEY = "AIzaSyCnBcFQeiGJf8DovA6HcZjUoqlNud8kkU4"
 
-# قائمة الوحش: عملات ثقيلة + عملات سريعة الحركة جداً (Meme & AI)
-WATCHLIST = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT", "SUI/USDT", 
-             "PEPE/USDT", "WIF/USDT", "DOGE/USDT", "RENDER/USDT", "XRP/USDT"]
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel('gemini-1.5-flash')
+
+WATCHLIST = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "SUI/USDT", "PEPE/USDT", "DOGE/USDT", "WIF/USDT", "RENDER/USDT"]
 
 def send_telegram_msg(msg: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -21,7 +26,6 @@ def send_telegram_msg(msg: str):
 class FastTrader:
     def __init__(self):
         self.f = "wallet.json"
-        # إنشاء محفظة جديدة خالية من قيود المحرك القديم
         if not os.path.exists(self.f):
             with open(self.f, "w") as file: json.dump({"balance": 100.0, "pos": {}}, file)
     
@@ -40,70 +44,99 @@ class FastTrader:
             ep = pos["entry"]
             profit = ((cp - ep) / ep) * 100
             
-            # عقلية جني الأرباح: يبيع عند ربح سريع (+0.7%) أو يوقف الخسارة مبكراً (-1.5%)
-            if profit >= 0.7 or profit <= -1.5:
+            tp = pos.get("tp_percent", 1.5)
+            sl = pos.get("sl_percent", -1.0)
+            
+            if profit >= tp or profit <= sl:
                 rev = pos["qty"] * cp
                 d["balance"] += rev
                 pnl = rev - (pos["qty"] * ep)
-                icon = "✅ ربح سريع" if pnl > 0 else "❌ وقف خسارة"
+                icon = f"✅ ربح شامل (+{tp}%)" if pnl > 0 else f"❌ انسحاب تكتيكي ({sl}%)"
                 sold.append(f"{icon} {sym}: {profit:.2f}% | ${pnl:.2f}")
                 del d["pos"][sym]
         if sold:
             self.save(d)
-            send_telegram_msg("🔔 [إغلاق صفقات آلي]\n" + "\n".join(sold) + f"\nالرصيد المحدث: ${d['balance']:.2f}")
+            send_telegram_msg("🔔 [قرار جيميناي السيادي]\n" + "\n".join(sold) + f"\nالرصيد المتاح: ${d['balance']:.2f}")
         return d
 
-    def buy(self, sym, price, reason):
+    def buy(self, sym, price, reason, tp, sl):
         d = self.run()
-        # لا تشتري إذا كنا نملك العملة أو الرصيد غير كافي
         if sym in d["pos"] or d["balance"] < 15: return False
         
-        # يدخل بـ 35% من الرصيد في كل فرصة لزيادة سرعة الربح
-        amount = d["balance"] * 0.35 
+        amount = d["balance"] * 0.40 
         qty = amount / price
         d["balance"] -= amount
-        d["pos"][sym] = {"entry": price, "qty": qty}
+        d["pos"][sym] = {"entry": price, "qty": qty, "tp_percent": tp, "sl_percent": sl}
         self.save(d)
-        send_telegram_msg(f"🟢 [هجوم - شراء فوري]\nالعملة: {sym}\nالسعر: ${price:,.5f}\nالسبب: {reason}")
+        send_telegram_msg(f"🌍 [جيميناي - شراء جيوسياسي]\nالعملة: {sym}\nالسعر: ${price:,.5f}\nالهدف: +{tp}%\nالوقف: {sl}%\nالتحليل الشامل: {reason}")
         return True
 
-class HyperAIBrain:
+class GeminiBrain:
     def __init__(self):
         self.ex = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
         self.trader = FastTrader()
+        self.global_news = "لا توجد أخبار حالياً"
+        self.last_news_update = 0
+
+    def update_news_radar(self):
+        # رادار يسحب الأخبار العاجلة مجاناً كل 15 دقيقة
+        if time.time() - self.last_news_update < 900: return
+        try:
+            resp = requests.get("https://cointelegraph.com/rss", timeout=5)
+            root = ET.fromstring(resp.content)
+            headlines = [item.find('title').text for item in root.findall('./channel/item')[:5]]
+            self.global_news = " | ".join(headlines)
+            self.last_news_update = time.time()
+        except:
+            pass
+
+    def ask_gemini(self, coin, closes, volumes):
+        prompt = f"""
+        أنت مدير محفظة استثمارية كبرى (Hedge Fund Manager) وقارئ نهم للأحداث الجيوسياسية والاقتصادية.
+        العملة: {coin}
+        الأسعار الفنية (5 دقائق): {closes}
+        رادار الأخبار العالمية الآن: {self.global_news}
+        
+        ادمج التحليل الفني مع الأخبار العالمية الحية. هل هناك فرصة شراء قوية الآن؟
+        يجب أن ترد بصيغة JSON فقط كالتالي (بدون أي نصوص إضافية):
+        {{"action": "BUY" or "HOLD", "reason": "سبب يدمج الفني بالأخبار", "tp": 2.0, "sl": -1.2}}
+        """
+        try:
+            response = model.generate_content(prompt)
+            text = response.text.strip().replace("```json", "").replace("```", "")
+            return json.loads(text)
+        except Exception:
+            return {"action": "HOLD"}
 
     def scan(self):
+        self.update_news_radar()
         intel = []
         current_prices = {}
         
         for sym in WATCHLIST:
             try:
-                # يقرأ آخر 5 حركات (كل شمعة 5 دقائق)
                 ohlcv = self.ex.fetch_ohlcv(sym, "5m", limit=5)
                 if not ohlcv: continue
                 closes = [float(k[4]) for k in ohlcv]
+                volumes = [float(k[5]) for k in ohlcv]
                 cp = closes[-1]
                 clean = sym.replace("/", "")
                 current_prices[clean] = cp
                 
-                if len(closes) >= 3:
-                    # عقلية الهجوم 1: الشراء عند التفاؤل والزخم (شمعتين صعود)
-                    if closes[-1] > closes[-2] and closes[-2] > closes[-3]:
-                        self.trader.buy(clean, cp, "🚀 صعود قوي وتفاؤل بالسوق (ركوب الموجة)")
-                    
-                    # عقلية الهجوم 2: الشراء من الانخفاض عند أول ارتداد
-                    elif closes[-1] > closes[-2] and closes[-2] < closes[-3]:
-                        self.trader.buy(clean, cp, "🎯 اصطياد قاع سريع (ارتداد إيجابي)")
-                        
+                decision = self.ask_gemini(clean, closes, volumes)
+                
+                if decision.get("action") == "BUY":
+                    self.trader.buy(clean, cp, decision.get("reason", "اقتناص فرصة مؤكدة"), decision.get("tp", 1.5), decision.get("sl", -1.0))
+                
                 intel.append(f"🔹 {clean}: ${cp:,.4f}")
+                time.sleep(1.5)
             except:
                 continue
                 
-        # تفقد المبيعات
         state = self.trader.check_sells(current_prices)
         return intel, state
 
-brain = HyperAIBrain()
+brain = GeminiBrain()
 ping = 0
 
 @app.route('/')
@@ -116,9 +149,9 @@ def home():
             bal = state["balance"]
             pos = len(state["pos"])
             text = "\n".join(intel) if intel else "لا بيانات"
-            send_telegram_msg(f"🔥 تقرير الذكاء ההجومي:\nالرصيد المتاح: ${bal:.2f}\nالصفقات المفتوحة: {pos}\n\n{text}")
+            send_telegram_msg(f"🌍 تقرير جيميناي الشامل (اقتصاد + فني):\nالرصيد المتاح: ${bal:.2f}\nالصفقات المفتوحة: {pos}\n\n{text}")
         return "OK", 200
-    except Exception as e:
+    except Exception:
         return "Err", 500
 
 if __name__ == "__main__":
