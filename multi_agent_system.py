@@ -4,164 +4,182 @@ import requests
 import ccxt
 import time
 import threading
-import xml.etree.ElementTree as ET
 from flask import Flask
 import google.generativeai as genai
 
 app = Flask(__name__)
 
-TELEGRAM_BOT_TOKEN = "8849431477:AAGVNZett1gWBikPg6fWJ4p2CJhQJxWEaaw"
-TELEGRAM_CHAT_ID = "7106069536"
-GEMINI_API_KEY = "AIzaSyCnBcFQeiGJf8DovA6HcZjUoqlNud8kkU4"
+# الأمان الصارم: جلب المفاتيح من بيئة النظام
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = "7106069536" 
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-genai.configure(api_key=GEMINI_API_KEY)
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-WATCHLIST = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "SUI/USDT", "PEPE/USDT", "DOGE/USDT", "WIF/USDT", "RENDER/USDT"]
+WATCHLIST = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "SUI/USDT", "PEPE/USDT", "WIF/USDT"]
 
 def send_telegram_msg(msg: str):
+    if not TELEGRAM_BOT_TOKEN: return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try: requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=5)
     except: pass
 
-class FastTrader:
+class TradeMemory:
     def __init__(self):
-        self.f = "wallet.json"
+        self.f = "memory.json"
+        if not os.path.exists(self.f):
+            with open(self.f, "w") as file: json.dump({"trades": [], "win_rate": 0.0, "total_pnl": 0.0}, file)
+            
+    def log_trade(self, coin, strategy, profit_pct, pnl_usd):
+        with open(self.f, "r") as file: data = json.load(file)
+        data["trades"].append({"coin": coin, "strategy": strategy, "profit_pct": profit_pct, "pnl_usd": pnl_usd})
+        wins = sum(1 for t in data["trades"] if t["pnl_usd"] > 0)
+        data["win_rate"] = (wins / len(data["trades"])) * 100
+        data["total_pnl"] += pnl_usd
+        with open(self.f, "w") as file: json.dump(data, file)
+        return data
+
+class RiskBrain:
+    def __init__(self, risk_per_trade_pct=1.0):
+        self.risk_pct = risk_per_trade_pct / 100.0
+
+    def calculate_position(self, balance, sl_pct):
+        if sl_pct >= 0: return 0
+        risk_amount = balance * self.risk_pct
+        position_size = risk_amount / abs(sl_pct / 100.0)
+        return min(position_size, balance * 0.50)
+
+class MarketBrain:
+    def __init__(self):
+        self.ex = ccxt.mexc({'enableRateLimit': True})
+        
+    def scan_momentum(self, sym):
+        try:
+            ohlcv = self.ex.fetch_ohlcv(sym, "5m", limit=15)
+            if not ohlcv: return None
+            closes = [float(k[4]) for k in ohlcv]
+            volumes = [float(k[5]) for k in ohlcv]
+            
+            avg_vol = sum(volumes[:-1]) / len(volumes[:-1]) if len(volumes)>1 else 1
+            vol_spike = volumes[-1] > (avg_vol * 1.5)
+            trend = "صاعد" if closes[-1] > closes[0] else "هابط"
+            
+            return {"closes": closes, "vol_spike": vol_spike, "trend": trend}
+        except: return None
+
+class ExecutionBrain:
+    def __init__(self):
+        self.f = "wallet_v3.json"
+        self.memory = TradeMemory()
         if not os.path.exists(self.f):
             with open(self.f, "w") as file: json.dump({"balance": 100.0, "pos": {}}, file)
-    
+            
     def run(self):
         with open(self.f, "r") as file: return json.load(file)
-        
     def save(self, d):
         with open(self.f, "w") as file: json.dump(d, file)
 
-    def check_sells(self, prices):
+    def update_positions(self, current_prices):
         d = self.run()
         sold = []
         for sym, pos in list(d["pos"].items()):
-            if sym not in prices: continue
-            cp = prices[sym]
+            if sym not in current_prices: continue
+            cp = current_prices[sym]
             ep = pos["entry"]
-            profit = ((cp - ep) / ep) * 100
+            profit_pct = ((cp - ep) / ep) * 100
             
-            tp = pos.get("tp_percent", 1.5)
-            sl = pos.get("sl_percent", -1.0)
-            
-            if profit >= tp or profit <= sl:
+            if profit_pct >= pos["tp"] or profit_pct <= pos["sl"]:
                 rev = pos["qty"] * cp
                 d["balance"] += rev
                 pnl = rev - (pos["qty"] * ep)
-                icon = f"✅ ربح شامل (+{tp}%)" if pnl > 0 else f"❌ انسحاب تكتيكي ({sl}%)"
-                sold.append(f"{icon} {sym}: {profit:.2f}% | ${pnl:.2f}")
+                self.memory.log_trade(sym, pos["strategy"], profit_pct, pnl)
+                
+                icon = "✅ ربح" if pnl > 0 else "❌ وقف خسارة"
+                sold.append(f"{icon} {sym}: {profit_pct:.2f}% | ${pnl:.2f}")
                 del d["pos"][sym]
         if sold:
             self.save(d)
-            send_telegram_msg("🔔 [قرار جيميناي السيادي]\n" + "\n".join(sold) + f"\nالرصيد المتاح: ${d['balance']:.2f}")
+            mem_data = self.memory.log_trade("","",0,0)
+            send_telegram_msg(f"🔔 [إغلاق الصفقات]\n" + "\n".join(sold) + f"\nالرصيد: ${d['balance']:.2f}\nمعدل النجاح: {mem_data['win_rate']:.1f}%")
         return d
 
-    def buy(self, sym, price, reason, tp, sl):
+    def execute_trade(self, sym, price, size, tp, sl, strategy):
         d = self.run()
-        if sym in d["pos"] or d["balance"] < 15: return False
-        
-        amount = d["balance"] * 0.40 
-        qty = amount / price
-        d["balance"] -= amount
-        d["pos"][sym] = {"entry": price, "qty": qty, "tp_percent": tp, "sl_percent": sl}
+        qty = size / price
+        d["balance"] -= size
+        d["pos"][sym] = {"entry": price, "qty": qty, "tp": tp, "sl": sl, "strategy": strategy}
         self.save(d)
-        send_telegram_msg(f"🌍 [جيميناي - شراء جيوسياسي]\nالعملة: {sym}\nالسعر: ${price:,.5f}\nالهدف: +{tp}%\nالوقف: {sl}%\nالتحليل الشامل: {reason}")
-        return True
+        send_telegram_msg(f"⚡ [دخول Paper Trading]\nالعملة: {sym}\nالاستراتيجية: {strategy}\nالحجم: ${size:.2f}\nالهدف: +{tp}%\nالوقف: {sl}%")
 
-class GeminiBrain:
+class AI_System:
     def __init__(self):
-        self.ex = ccxt.mexc({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
-        self.trader = FastTrader()
-        self.global_news = "لا توجد أخبار حالياً"
-        self.last_news_update = 0
+        self.market = MarketBrain()
+        self.risk = RiskBrain(risk_per_trade_pct=1.0)
+        self.executor = ExecutionBrain()
 
-    def update_news_radar(self):
-        if time.time() - self.last_news_update < 900: return
-        try:
-            resp = requests.get("https://cointelegraph.com/rss", timeout=5)
-            root = ET.fromstring(resp.content)
-            headlines = [item.find('title').text for item in root.findall('./channel/item')[:5]]
-            self.global_news = " | ".join(headlines)
-            self.last_news_update = time.time()
-        except:
-            pass
-
-    def ask_gemini(self, coin, closes, volumes):
+    def decide(self, coin, data):
         prompt = f"""
-        أنت مدير محفظة استثمارية كبرى (Hedge Fund Manager) وقارئ نهم للأحداث الجيوسياسية والاقتصادية.
+        أنت عقل كمي (Quant AI). 
         العملة: {coin}
-        الأسعار الفنية (5 دقائق): {closes}
-        رادار الأخبار العالمية الآن: {self.global_news}
+        الأسعار (15 شمعة): {data['closes']}
+        الزخم: {data['trend']} | اختراق سيولة: {data['vol_spike']}
         
-        ادمج التحليل الفني مع الأخبار العالمية الحية. هل هناك فرصة شراء قوية الآن؟
-        يجب أن ترد بصيغة JSON فقط كالتالي (بدون أي نصوص إضافية):
-        {{"action": "BUY" or "HOLD", "reason": "سبب يدمج الفني بالأخبار", "tp": 2.0, "sl": -1.2}}
+        حلل بناءً على Price Action والزخم.
+        الرد JSON فقط: {{"action": "BUY", "strategy": "Breakout", "tp": 2.5, "sl": -1.0, "score": 85}}
+        الـ score من 100. لا تشتري إلا إذا كان الـ score أعلى من 80.
         """
         try:
-            response = model.generate_content(prompt)
-            text = response.text.strip().replace("```json", "").replace("```", "")
-            return json.loads(text)
-        except Exception:
-            return {"action": "HOLD"}
+            resp = model.generate_content(prompt).text.strip().replace("```json", "").replace("```", "")
+            return json.loads(resp)
+        except: return {"action": "HOLD"}
 
     def scan(self):
-        self.update_news_radar()
-        intel = []
-        current_prices = {}
+        state = self.executor.run()
+        prices = {}
+        reports = []
         
         for sym in WATCHLIST:
-            try:
-                ohlcv = self.ex.fetch_ohlcv(sym, "5m", limit=5)
-                if not ohlcv: continue
-                closes = [float(k[4]) for k in ohlcv]
-                volumes = [float(k[5]) for k in ohlcv]
-                cp = closes[-1]
-                clean = sym.replace("/", "")
-                current_prices[clean] = cp
-                
-                decision = self.ask_gemini(clean, closes, volumes)
-                
-                if decision.get("action") == "BUY":
-                    self.trader.buy(clean, cp, decision.get("reason", "اقتناص فرصة مؤكدة"), decision.get("tp", 1.5), decision.get("sl", -1.0))
-                
-                intel.append(f"🔹 {clean}: ${cp:,.4f}")
-                time.sleep(1.5)
-            except:
-                continue
-                
-        state = self.trader.check_sells(current_prices)
-        return intel, state
+            data = self.market.scan_momentum(sym)
+            if not data: continue
+            
+            cp = data['closes'][-1]
+            clean = sym.replace("/", "")
+            prices[clean] = cp
+            
+            if clean not in state["pos"] and state["balance"] > 10:
+                decision = self.decide(clean, data)
+                if decision.get("action") == "BUY" and decision.get("score", 0) >= 80:
+                    tp = float(decision.get("tp", 2.0))
+                    sl = float(decision.get("sl", -1.0))
+                    if tp > abs(sl):
+                        size = self.risk.calculate_position(state["balance"], sl)
+                        if size > 5:
+                            self.executor.execute_trade(clean, cp, size, tp, sl, decision.get("strategy", "Momentum"))
+            
+            reports.append(f"🔹 {clean}: ${cp:,.4f}")
+            time.sleep(1.5)
+            
+        self.executor.update_positions(prices)
+        return reports, state
 
-brain = GeminiBrain()
-ping_count = 0
+sys = AI_System()
+ping = 0
 
-def background_trading_loop():
-    global ping_count
+def run_bot():
+    global ping
     while True:
         try:
-            intel, state = brain.scan()
-            ping_count += 1
-            if ping_count % 6 == 0:
-                bal = state["balance"]
-                pos = len(state["pos"])
-                text = "\n".join(intel) if intel else "لا بيانات"
-                send_telegram_msg(f"🌍 تقرير جيميناي الشامل (اقتصاد + فني):\nالرصيد المتاح: ${bal:.2f}\nالصفقات المفتوحة: {pos}\n\n{text}")
-        except Exception:
-            pass
-        # ينتظر البوت 5 دقائق قبل المسح التالي ليتداول بشكل مستقل تماماً
-        time.sleep(300) 
+            reports, state = sys.scan()
+            ping += 1
+            if ping % 10 == 0:
+                send_telegram_msg(f"📊 تقرير V3 (Paper Trading):\nالرصيد: ${state['balance']:.2f}\nالصفقات: {len(state['pos'])}\n\n" + "\n".join(reports))
+        except: pass
+        time.sleep(180)
 
-# تشغيل العقل المتداول في الخلفية بمجرد تشغيل السيرفر
-threading.Thread(target=background_trading_loop, daemon=True).start()
+threading.Thread(target=run_bot, daemon=True).start()
 
 @app.route('/')
-def home():
-    # هذه الواجهة ترد على UptimeRobot فوراً لمنع رسائل الخطأ
-    return "Gemini Trading Agent is ACTIVE and scanning in the background!", 200
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+def home(): return "V3 Paper Trading System is Running!", 200
+if __name__ == "__main__": app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
