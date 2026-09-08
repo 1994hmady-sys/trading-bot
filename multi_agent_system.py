@@ -2,7 +2,7 @@ import os, json, time, threading, math
 from datetime import datetime, timezone
 import requests, ccxt
 import pandas as pd
-import pandas_ta as ta
+import pandas_ta_classic as ta
 from flask import Flask
 from google import genai
 from google.genai import types
