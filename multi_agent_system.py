@@ -114,7 +114,7 @@ def get_market_snapshot(symbol: str) -> dict:
     """Get latest price, RSI, EMA, and ATR for a symbol."""
     return {"ok": True, "data": market.snapshot(symbol)}
 
-def get_trade_history(limit: int = 5) -> dict:
+def get_trade_history(limit: int) -> dict:
     """Review past closed trades to learn from mistakes."""
     history = memory.read().get("trade_history", [])[-limit:]
     return {"ok": True, "trades": history}
