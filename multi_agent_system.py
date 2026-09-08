@@ -1,114 +1,211 @@
-import os, json, requests, ccxt, time, threading
+import os, json, time, threading, math
+from datetime import datetime, timezone
+import requests, ccxt
+import pandas as pd
+import pandas_ta as ta
 from flask import Flask
-import google.generativeai as genai
+from google import genai
+from google.genai import types
+
+# ==========================================
+# AATA V7.1 - Autonomous Adaptive Agent
+# PAPER TRADING ONLY - ReAct Architecture
+# ==========================================
+
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = "7106069536"
+GEMINI_MODEL = "gemini-2.5-flash"
+
+if GEMINI_API_KEY:
+    client = genai.Client(api_key=GEMINI_API_KEY)
 
 app = Flask(__name__)
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = "7106069536" 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+WATCHLIST = ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+INITIAL_CAPITAL = 100.0
 
-if GEMINI_API_KEY: genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
-
-WATCHLIST = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "SUI/USDT", "PEPE/USDT", "WIF/USDT"]
-
-def send_telegram_msg(msg: str):
+def send_telegram(msg):
     if not TELEGRAM_BOT_TOKEN: return
-    try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg}, timeout=5)
+    try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg[:4000]}, timeout=5)
     except: pass
 
-class MarketBrain:
-    def __init__(self): self.ex = ccxt.mexc({'enableRateLimit': True})
-    def scan(self, sym):
+class StructuredMemory:
+    def __init__(self):
+        self.path = "aata_memory.json"
+        self.lock = threading.Lock()
+        if not os.path.exists(self.path): self.write(self.default_state())
+
+    def default_state(self):
+        return {"portfolio": {"cash": INITIAL_CAPITAL, "positions": {}}, "strategies": {}, "trade_history": []}
+
+    def read(self):
+        with self.lock:
+            try:
+                with open(self.path, "r") as f: return json.load(f)
+            except: return self.default_state()
+
+    def write(self, state):
+        with self.lock:
+            with open(self.path, "w") as f: json.dump(state, f, indent=2)
+
+class MarketEngine:
+    def __init__(self): self.exchange = ccxt.mexc({'enableRateLimit': True})
+    def snapshot(self, symbol):
         try:
-            ohlcv = self.ex.fetch_ohlcv(sym, "5m", limit=15)
-            if not ohlcv: return None
-            closes = [float(k[4]) for k in ohlcv]
-            return {"closes": closes, "trend": "صاعد" if closes[-1] > closes[0] else "هابط"}
+            df = pd.DataFrame(self.exchange.fetch_ohlcv(symbol, "15m", limit=50), columns=["timestamp", "open", "high", "low", "close", "volume"])
+            df["RSI"] = ta.rsi(df["close"], length=14)
+            df["EMA20"] = ta.ema(df["close"], length=20)
+            df["ATR"] = ta.atr(df["high"], df["low"], df["close"], length=14)
+            last = df.iloc[-1]
+            return {"symbol": symbol, "price": float(last["close"]), "rsi": float(last["RSI"]), "ema20": float(last["EMA20"]), "atr": float(last["ATR"])}
         except: return None
 
-class ExecutionBrain:
-    def __init__(self):
-        self.f = "wallet_v4.json"
-        if not os.path.exists(self.f):
-            with open(self.f, "w") as file: json.dump({"balance": 100.0, "pos": {}}, file)
-    def run(self):
-        with open(self.f, "r") as file: return json.load(file)
-    def save(self, d):
-        with open(self.f, "w") as file: json.dump(d, file)
-    def update_positions(self, current_prices):
-        d = self.run()
-        sold = []
-        for sym, pos in list(d["pos"].items()):
-            if sym not in current_prices: continue
-            cp = current_prices[sym]
-            ep = pos["entry"]
-            profit_pct = ((cp - ep) / ep) * 100
-            if profit_pct >= pos["tp"] or profit_pct <= pos["sl"]:
-                rev = pos["qty"] * cp
-                d["balance"] += rev
-                pnl = rev - (pos["qty"] * ep)
-                icon = "✅ ربح" if pnl > 0 else "❌ انسحاب"
-                sold.append(f"{icon} {sym}: {profit_pct:.2f}% | ${pnl:.2f}")
-                del d["pos"][sym]
-        if sold:
-            self.save(d)
-            send_telegram_msg(f"🔔 [إغلاق الصفقات بقرار العقل]\n" + "\n".join(sold) + f"\nالرصيد: ${d['balance']:.2f}")
-        return d
-    def execute_trade(self, sym, price, size, tp, sl, strategy, reason):
-        d = self.run()
-        qty = size / price
-        d["balance"] -= size
-        d["pos"][sym] = {"entry": price, "qty": qty, "tp": tp, "sl": sl, "strategy": strategy}
-        self.save(d)
-        send_telegram_msg(f"🧠 [جيميناي يتخذ القرار]\nالعملة: {sym}\nالاستراتيجية: {strategy}\nالمبرر: {reason}\nالحجم: ${size:.2f}\nالهدف: +{tp}%\nالوقف: {sl}%")
+class PaperBroker:
+    def __init__(self, memory, market):
+        self.memory = memory
+        self.market = market
 
-class AI_System:
-    def __init__(self):
-        self.market = MarketBrain()
-        self.executor = ExecutionBrain()
-    def decide(self, coin, data):
-        prompt = f"""أنت العقل المتحكم تماماً في محفظة تداول. السوق الآن {data['trend']} لعملة {coin}. أسعارها: {data['closes']}.
-        لا توجد قيود. قرر استراتيجية تناسب اللحظة (مثلاً قناص سريع، صائد قيعان، الخ). 
-        رد بـ JSON فقط: {{"action": "BUY", "strategy": "اسم الاستراتيجية", "reason": "سبب الدخول باختصار", "tp": 1.5, "sl": -1.0, "risk_pct": 5.0}}
-        إذا لم يكن هناك أي فرصة منطقية، اجعل action: HOLD."""
-        try:
-            resp = model.generate_content(prompt).text.strip().replace("```json", "").replace("```", "")
-            return json.loads(resp)
-        except: return {"action": "HOLD"}
-    def scan(self):
-        state = self.executor.run()
-        prices = {}
-        for sym in WATCHLIST:
-            data = self.market.scan(sym)
-            if not data: continue
-            cp = data['closes'][-1]
-            clean = sym.replace("/", "")
-            prices[clean] = cp
-            if clean not in state["pos"] and state["balance"] > 15:
-                decision = self.decide(clean, data)
-                if decision.get("action") == "BUY":
-                    risk_pct = float(decision.get("risk_pct", 5.0)) / 100.0
-                    size = state["balance"] * risk_pct
-                    if size > 5:
-                        self.executor.execute_trade(clean, cp, size, float(decision.get("tp", 1.5)), float(decision.get("sl", -1.0)), decision.get("strategy", "Dynamic"), decision.get("reason", "قرار ديناميكي"))
-            time.sleep(2)
-        self.executor.update_positions(prices)
-        return state
+    def open_position(self, state, symbol, direction, risk_pct, strategy):
+        if symbol in state["portfolio"]["positions"]: return {"ok": False, "error": "Position exists"}
+        snap = self.market.snapshot(symbol)
+        if not snap: return {"ok": False, "error": "No market data"}
+        
+        price = snap["price"]
+        risk_pct = max(0.01, min(0.25, float(risk_pct)))
+        margin = state["portfolio"]["cash"] * risk_pct
+        if margin <= 0: return {"ok": False, "error": "Insufficient cash"}
+        
+        qty = margin / price
+        sl_dist = snap["atr"] * 2
+        tp_dist = snap["atr"] * 3
+        
+        sl = price - sl_dist if direction == "Long" else price + sl_dist
+        tp = price + tp_dist if direction == "Long" else price - tp_dist
+        
+        state["portfolio"]["cash"] -= margin
+        state["portfolio"]["positions"][symbol] = {"entry": price, "qty": qty, "margin": margin, "direction": direction, "sl": sl, "tp": tp, "strategy": strategy}
+        return {"ok": True, "symbol": symbol, "direction": direction, "entry": price, "sl": sl, "tp": tp}
 
-sys = AI_System()
+    def close_position(self, state, symbol, reason):
+        if symbol not in state["portfolio"]["positions"]: return {"ok": False, "error": "No open position"}
+        pos = state["portfolio"]["positions"][symbol]
+        snap = self.market.snapshot(symbol)
+        if not snap: return {"ok": False, "error": "No market data"}
+        
+        price = snap["price"]
+        if pos["direction"] == "Long": pnl = (price - pos["entry"]) * pos["qty"]
+        else: pnl = (pos["entry"] - price) * pos["qty"]
+        
+        state["portfolio"]["cash"] += (pos["margin"] + pnl)
+        state["trade_history"].append({"symbol": symbol, "strategy": pos["strategy"], "pnl": pnl, "reason": reason})
+        del state["portfolio"]["positions"][symbol]
+        return {"ok": True, "pnl": pnl}
+
+memory = StructuredMemory()
+market = MarketEngine()
+broker = PaperBroker(memory, market)
+
+# --- AATA TOOLS (Function Declarations) ---
+def get_portfolio_state() -> dict:
+    """Fetch current cash and open positions."""
+    return memory.read()["portfolio"]
+
+def get_market_snapshot(symbol: str) -> dict:
+    """Get latest price, RSI, EMA, and ATR for a symbol."""
+    return {"ok": True, "data": market.snapshot(symbol)}
+
+def get_trade_history(limit: int = 5) -> dict:
+    """Review past closed trades to learn from mistakes."""
+    history = memory.read().get("trade_history", [])[-limit:]
+    return {"ok": True, "trades": history}
+
+def open_position(symbol: str, direction: str, risk_pct: float, strategy: str) -> dict:
+    """Open a new Paper trade (Long or Short). risk_pct between 0.01 and 0.25"""
+    state = memory.read()
+    res = broker.open_position(state, symbol, direction, risk_pct, strategy)
+    if res.get("ok"): memory.write(state)
+    return res
+
+def close_position(symbol: str, reason: str) -> dict:
+    """Close an existing open position."""
+    state = memory.read()
+    res = broker.close_position(state, symbol, reason)
+    if res.get("ok"): memory.write(state)
+    return res
+
+def wait(reason: str) -> dict:
+    """Decide not to trade and wait for better conditions."""
+    return {"ok": True, "action": "WAIT", "reason": reason}
+
+tools_map = {
+    "get_portfolio_state": get_portfolio_state,
+    "get_market_snapshot": get_market_snapshot,
+    "get_trade_history": get_trade_history,
+    "open_position": open_position,
+    "close_position": close_position,
+    "wait": wait
+}
+
+# --- AATA Core Loop ---
+def run_agent_cycle():
+    sys_inst = "أنت AATA، وكيل تداول ذكي. افحص المحفظة والسوق باستخدام الأدوات. تعلم من الصفقات السابقة. لا تتسرع. استخدم أدواتك لاتخاذ قرار (فتح، إغلاق، أو انتظار)."
+    try:
+        chat = client.chats.create(
+            model=GEMINI_MODEL,
+            config=types.GenerateContentConfig(
+                system_instruction=sys_inst,
+                tools=list(tools_map.values()),
+                temperature=0.2
+            )
+        )
+        
+        response = chat.send_message("ابدأ دورة السوق الحالية واستخدم أدواتك للقرار.")
+        step = 0
+        while response.function_calls and step < 4:
+            step += 1
+            for call in response.function_calls:
+                fn_name = call.name
+                fn_args = {k: v for k, v in call.args.items()} if call.args else {}
+                fn = tools_map.get(fn_name)
+                
+                result = fn(**fn_args) if fn else {"error": "Tool not found"}
+                
+                if fn_name in ["open_position", "close_position"]:
+                    send_telegram(f"⚡ [AATA Action]\nTool: {fn_name}\nArgs: {fn_args}\nResult: {result}")
+                
+                response = chat.send_message(types.Part.from_function_response(name=fn_name, response={"result": result}))
+    except Exception as e:
+        print(f"Agent Loop Error: {e}")
+
 ping = 0
-def run_bot():
+def main_loop():
     global ping
     while True:
         try:
-            state = sys.scan()
+            # Auto SL/TP Check
+            state = memory.read()
+            for sym, pos in list(state["portfolio"]["positions"].items()):
+                snap = market.snapshot(sym)
+                if snap:
+                    cp = snap["price"]
+                    if (pos["direction"] == "Long" and (cp <= pos["sl"] or cp >= pos["tp"])) or \
+                       (pos["direction"] == "Short" and (cp >= pos["sl"] or cp <= pos["tp"])):
+                        res = broker.close_position(state, sym, "Auto SL/TP")
+                        memory.write(state)
+                        send_telegram(f"🛑 [Auto Close]\nSymbol: {sym}\nPnL: ${res.get('pnl', 0):.2f}")
+            
+            run_agent_cycle()
             ping += 1
-            if ping % 10 == 0: send_telegram_msg(f"📊 تقرير V4 (القيادة لجيميناي):\nالرصيد: ${state['balance']:.2f}\nالصفقات المفتوحة: {len(state['pos'])}")
+            if ping % 20 == 0:
+                s = memory.read()
+                send_telegram(f"📊 [AATA V7.1 System]\nAlive & Monitoring.\nCash: ${s['portfolio']['cash']:.2f}")
         except: pass
-        time.sleep(120)
+        time.sleep(180)
 
-threading.Thread(target=run_bot, daemon=True).start()
+threading.Thread(target=main_loop, daemon=True).start()
+
 @app.route('/')
-def home(): return "V4 Unchained is Running!", 200
-if __name__ == "__main__": app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+def home(): return "AATA V7.1 Active!", 200
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
