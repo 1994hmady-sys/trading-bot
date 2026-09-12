@@ -970,4 +970,6 @@ class PaperBroker:
                 "ok": False,
                 "error":
                     "risk_pct is 0 - "
+                    "must be greater than zero"
+            }
             
