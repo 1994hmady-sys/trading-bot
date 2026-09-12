@@ -1,41 +1,36 @@
-cat << 'EOF' > multi_agent_system.py
 import os, json, time, math, threading, sys, random
-from datetime import datetime, timezone
-
-import requests
-import ccxt
+from datetime import datetime, timezone, date
+import requests, ccxt
 import pandas as pd
 import pandas_ta_classic as ta
 from flask import Flask
 from google import genai
 from google.genai import types
 
-
 # ==========================================
 # AATA V7.9.2
-# Controlled Gemini Transient Error Retry
+# Paper Trading Validation Build
 #
-# FIXES:
-# 1. No ThreadPoolExecutor
-# 2. Real Gemini HTTP timeout = 60 seconds
-# 3. SDK internal retry disabled
-# 4. AATA handles ONLY 429 / 503
-# 5. Maximum 2 extra retries
-# 6. Exponential backoff: 2s -> 4s
-# 7. Small jitter
-# 8. Gemini 3 function call IDs preserved
+# Council:
+# Hamida = CEO / Final Decision
+# Claude = Architecture / Development
+# ChatGPT = QA / Debugger
+# Gemini = DevOps / Infrastructure
 #
-# NO changes to:
-# - PaperBroker
-# - Risk logic
-# - SL/TP
-# - Memory
-# - MEXC logic
+# V7.9.2 FIXES:
+# 1. HARD Symbol Guard
+# 2. Gemini daily request budget = 20
+# 3. Controlled 429/503 handling
+# 4. SDK automatic retry disabled
+# 5. Real HTTP timeout = 60s
+# 6. Gemini 3.6 Flash
+# 7. Function response id=call.id
+# 8. No orphaned threads
 # ==========================================
 
 
 # ==========================================
-# CONFIGURATION
+# CONFIG
 # ==========================================
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -47,30 +42,33 @@ GEMINI_MODEL = "gemini-3.6-flash"
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-# Real HTTP timeout
 GEMINI_HTTP_TIMEOUT_MS = 60000
 
+# Free Tier validation budget
+# Maximum actual Gemini HTTP requests allowed by AATA per UTC day.
+GEMINI_DAILY_REQUEST_LIMIT = 20
 
-# ==========================================
-# FAIL FAST
-# ==========================================
+# Controlled retry settings.
+# IMPORTANT:
+# 429 Daily Quota is NOT retried.
+# 503 may be retried once if budget remains.
+MAX_RETRIES = 1
+BASE_BACKOFF_SEC = 2.0
+MAX_JITTER_SEC = 1.0
+
 
 if not GEMINI_API_KEY:
-    print(
-        "FATAL: GEMINI_API_KEY is not set. "
-        "AATA cannot function without it. Exiting."
-    )
+    print("FATAL: GEMINI_API_KEY is not set. AATA cannot function without it.")
     sys.exit(1)
 
 
 # ==========================================
 # GEMINI CLIENT
-#
-# IMPORTANT:
-# SDK automatic retry is disabled.
-# AATA controls retry itself for 429/503 only.
 # ==========================================
 
+# Disable SDK automatic retries.
+# AATA owns the retry policy so we do not accidentally
+# multiply requests and consume the free quota.
 client = genai.Client(
     api_key=GEMINI_API_KEY,
     http_options=types.HttpOptions(
@@ -84,15 +82,10 @@ client = genai.Client(
 
 
 # ==========================================
-# FLASK
+# APP / TRADING CONFIG
 # ==========================================
 
 app = Flask(__name__)
-
-
-# ==========================================
-# TRADING CONFIG
-# ==========================================
 
 WATCHLIST = [
     "BTC/USDT",
@@ -100,54 +93,280 @@ WATCHLIST = [
     "SOL/USDT"
 ]
 
+ALLOWED_SYMBOLS = frozenset(WATCHLIST)
+
 INITIAL_CAPITAL = 100.0
 
 DRAWDOWN_WARN_PCT = 0.5
 
 MAX_RISK_NORMAL = 0.25
 MAX_RISK_AFTER_DRAWDOWN = 0.05
-
 MIN_RISK_FLOOR = 0.001
-
-
-# ==========================================
-# EMOTIONAL SYSTEM
-# ==========================================
 
 EMOTIONAL_START = 100
 EMOTIONAL_MIN = 0
 EMOTIONAL_MAX = 200
 
-WIN_SMALL = 3
-WIN_BIG = 8
+WIN_SMALL, WIN_BIG = 3, 8
+LOSS_SMALL, LOSS_BIG = -3, -8
 
-LOSS_SMALL = -3
-LOSS_BIG = -8
-
-
-# ==========================================
-# GEMINI RETRY SETTINGS
-# ==========================================
-
-MAX_RETRIES = 2
-
-BASE_BACKOFF_SEC = 2.0
-
-MAX_JITTER_SEC = 1.0
+VALID_DIRECTIONS = {"Long", "Short"}
 
 
 # ==========================================
-# BASIC HELPERS
+# GEMINI REQUEST BUDGET
 # ==========================================
 
-VALID_DIRECTIONS = {
-    "Long",
-    "Short"
+gemini_budget_lock = threading.RLock()
+
+gemini_budget = {
+    "date": datetime.now(timezone.utc).date().isoformat(),
+    "used": 0,
+    "limit": GEMINI_DAILY_REQUEST_LIMIT
 }
 
 
-class MemoryCorruptedError(Exception):
+def reset_gemini_budget_if_new_day():
+    today = datetime.now(timezone.utc).date().isoformat()
+
+    with gemini_budget_lock:
+        if gemini_budget["date"] != today:
+            gemini_budget["date"] = today
+            gemini_budget["used"] = 0
+
+            print(
+                f"[Gemini Budget] New UTC day detected. "
+                f"Budget reset to {GEMINI_DAILY_REQUEST_LIMIT}."
+            )
+
+
+def gemini_budget_remaining():
+    reset_gemini_budget_if_new_day()
+
+    with gemini_budget_lock:
+        return max(
+            0,
+            gemini_budget["limit"] - gemini_budget["used"]
+        )
+
+
+def reserve_gemini_request():
+    """
+    Reserve exactly one Gemini HTTP request.
+
+    Returns True if AATA is allowed to send.
+    Returns False if the daily budget is exhausted.
+    """
+
+    reset_gemini_budget_if_new_day()
+
+    with gemini_budget_lock:
+        if gemini_budget["used"] >= gemini_budget["limit"]:
+            return False
+
+        gemini_budget["used"] += 1
+
+        used = gemini_budget["used"]
+        remaining = gemini_budget["limit"] - used
+
+        print(
+            f"[Gemini Budget] Request #{used}/"
+            f"{gemini_budget['limit']} | "
+            f"Remaining: {remaining}"
+        )
+
+        return True
+
+
+def gemini_budget_status():
+    reset_gemini_budget_if_new_day()
+
+    with gemini_budget_lock:
+        return {
+            "date_utc": gemini_budget["date"],
+            "used": gemini_budget["used"],
+            "limit": gemini_budget["limit"],
+            "remaining": max(
+                0,
+                gemini_budget["limit"] - gemini_budget["used"]
+            )
+        }
+
+
+# ==========================================
+# ERROR CLASS
+# ==========================================
+
+class GeminiBudgetExhausted(Exception):
     pass
+
+
+# ==========================================
+# GEMINI ERROR HELPERS
+# ==========================================
+
+def get_error_code(exc):
+    """
+    Prefer structured APIError.code when available.
+    Fall back to conservative text detection.
+    """
+
+    code = getattr(exc, "code", None)
+
+    if isinstance(code, int):
+        return code
+
+    if isinstance(code, str):
+        try:
+            return int(code)
+        except Exception:
+            pass
+
+    text = str(exc)
+
+    if "429" in text:
+        return 429
+
+    if "503" in text:
+        return 503
+
+    return None
+
+
+def is_daily_quota_error(exc):
+    text = str(exc).lower()
+
+    quota_markers = [
+        "generate_requests_per_day",
+        "generaterequestsperday",
+        "free_tier_requests",
+        "daily quota",
+        "quota exceeded for metric",
+        "perdayperproject",
+        "per_day"
+    ]
+
+    return any(marker in text for marker in quota_markers)
+
+
+def is_transient_gemini_error(exc):
+    code = get_error_code(exc)
+
+    if code == 503:
+        return True
+
+    if code == 429 and not is_daily_quota_error(exc):
+        return True
+
+    return False
+
+
+# ==========================================
+# CONTROLLED GEMINI REQUEST
+# ==========================================
+
+def send_gemini_message(chat, message):
+    """
+    All Gemini requests MUST pass through this function.
+
+    Guarantees:
+    - Daily request budget
+    - No unlimited retry
+    - 429 Daily Quota is not retried
+    - 503 may be retried once
+    """
+
+    attempts = 0
+
+    while True:
+
+        if not reserve_gemini_request():
+            raise GeminiBudgetExhausted(
+                f"Gemini daily request budget exhausted: "
+                f"{GEMINI_DAILY_REQUEST_LIMIT}/"
+                f"{GEMINI_DAILY_REQUEST_LIMIT}"
+            )
+
+        try:
+            response = chat.send_message(message)
+
+            status = gemini_budget_status()
+
+            print(
+                f"[Gemini] Request successful | "
+                f"Used: {status['used']}/{status['limit']} | "
+                f"Remaining: {status['remaining']}"
+            )
+
+            return response
+
+        except Exception as e:
+
+            code = get_error_code(e)
+
+            # Daily quota = STOP.
+            # Do not waste another request.
+            if code == 429 and is_daily_quota_error(e):
+                print(
+                    "[Gemini] Daily quota reached. "
+                    "No retry will be attempted."
+                )
+                raise
+
+            # 400/401/403/404/etc = immediate failure.
+            if not is_transient_gemini_error(e):
+                raise
+
+            # Limited transient retry.
+            if attempts >= MAX_RETRIES:
+                raise
+
+            attempts += 1
+
+            delay = (
+                BASE_BACKOFF_SEC * (2 ** (attempts - 1))
+                + random.uniform(0, MAX_JITTER_SEC)
+            )
+
+            print(
+                f"[Gemini Retry] HTTP {code}. "
+                f"Retry {attempts}/{MAX_RETRIES} "
+                f"after {delay:.2f}s"
+            )
+
+            time.sleep(delay)
+
+
+# ==========================================
+# SYMBOL GUARD
+# ==========================================
+
+def validate_symbol(symbol):
+    """
+    HARD SECURITY BOUNDARY.
+
+    Gemini may request any symbol,
+    but AATA only permits WATCHLIST symbols.
+    """
+
+    if not isinstance(symbol, str):
+        return False, {
+            "ok": False,
+            "error": "Invalid symbol type."
+        }
+
+    symbol = symbol.strip().upper()
+
+    if symbol not in ALLOWED_SYMBOLS:
+        return False, {
+            "ok": False,
+            "error": (
+                f"Symbol '{symbol}' is NOT allowed. "
+                f"Allowed symbols: {WATCHLIST}"
+            )
+        }
+
+    return True, symbol
 
 
 # ==========================================
@@ -173,98 +392,21 @@ def emotional_state_and_multiplier(score):
 
 
 # ==========================================
-# TELEGRAM
+# MEMORY
 # ==========================================
 
-def send_telegram(msg):
+class MemoryCorruptedError(Exception):
+    pass
 
-    if not TELEGRAM_BOT_TOKEN:
-        return
-
-    try:
-
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": msg[:4000]
-            },
-            timeout=5
-        )
-
-    except Exception as e:
-
-        print(f"Telegram error: {e}")
-
-
-# ==========================================
-# SUPABASE LOGGING
-# ==========================================
-
-def log_to_supabase(action_type, details):
-
-    if not SUPABASE_URL or not SUPABASE_KEY:
-
-        print("Supabase not configured, skipping log.")
-        return
-
-    try:
-
-        endpoint = f"{SUPABASE_URL}/rest/v1/trade_logs"
-
-        headers = {
-            "apikey": SUPABASE_KEY,
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "Content-Type": "application/json",
-            "Prefer": "return=minimal"
-        }
-
-        payload = {
-            "log_data": {
-                "action": action_type,
-                "details": details,
-                "timestamp": datetime.now(
-                    timezone.utc
-                ).isoformat()
-            }
-        }
-
-        r = requests.post(
-            endpoint,
-            headers=headers,
-            json=payload,
-            timeout=5
-        )
-
-        if r.status_code >= 300:
-
-            print(
-                f"Supabase log failed: "
-                f"{r.status_code} {r.text}"
-            )
-
-    except Exception as e:
-
-        print(f"Supabase error: {e}")
-
-
-# ==========================================
-# STRUCTURED MEMORY
-# ==========================================
 
 class StructuredMemory:
 
     def __init__(self):
-
         self.path = "aata_memory.json"
-
         self.lock = threading.RLock()
 
         if not os.path.exists(self.path):
-
-            self.write(
-                self.default_state()
-            )
+            self.write(self.default_state())
 
 
     def default_state(self):
@@ -292,16 +434,11 @@ class StructuredMemory:
         with self.lock:
 
             if not os.path.exists(self.path):
-
                 return self.default_state()
 
             try:
 
-                with open(
-                    self.path,
-                    "r"
-                ) as f:
-
+                with open(self.path, "r") as f:
                     return json.load(f)
 
             except Exception as e:
@@ -317,11 +454,7 @@ class StructuredMemory:
 
             try:
 
-                with open(
-                    self.path,
-                    "w"
-                ) as f:
-
+                with open(self.path, "w") as f:
                     json.dump(
                         state,
                         f,
@@ -335,9 +468,8 @@ class StructuredMemory:
                 )
 
 
-# ==========================================
-# SAFE MEMORY READ
-# ==========================================
+memory = StructuredMemory()
+
 
 def safe_read_memory(context=""):
 
@@ -351,11 +483,107 @@ def safe_read_memory(context=""):
             f"🔴🔴 [خطأ حرج جداً]\n"
             f"{e}\n"
             f"السياق: {context}\n"
-            f"تم إيقاف هذه الدورة لمنع فقدان بيانات المحفظة. "
-            f"يتطلب تدخل يدوي فوري!"
+            f"تم إيقاف هذه الدورة لمنع فقدان بيانات المحفظة."
         )
 
         return None
+
+
+# ==========================================
+# TELEGRAM
+# ==========================================
+
+def send_telegram(msg):
+
+    if not TELEGRAM_BOT_TOKEN:
+        return
+
+    try:
+
+        requests.post(
+            f"https://api.telegram.org/bot"
+            f"{TELEGRAM_BOT_TOKEN}/sendMessage",
+
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": msg[:4000]
+            },
+
+            timeout=5
+        )
+
+    except Exception as e:
+
+        print(
+            f"Telegram error: {e}"
+        )
+
+
+# ==========================================
+# SUPABASE LOGGING
+# ==========================================
+
+def log_to_supabase(action_type, details):
+
+    if not SUPABASE_URL or not SUPABASE_KEY:
+
+        print(
+            "Supabase not configured, skipping log."
+        )
+
+        return
+
+    try:
+
+        endpoint = (
+            f"{SUPABASE_URL}/rest/v1/trade_logs"
+        )
+
+        headers = {
+            "apikey": SUPABASE_KEY,
+
+            "Authorization":
+                f"Bearer {SUPABASE_KEY}",
+
+            "Content-Type":
+                "application/json",
+
+            "Prefer":
+                "return=minimal"
+        }
+
+        payload = {
+            "log_data": {
+                "action": action_type,
+
+                "details": details,
+
+                "timestamp":
+                    datetime.now(
+                        timezone.utc
+                    ).isoformat()
+            }
+        }
+
+        r = requests.post(
+            endpoint,
+            headers=headers,
+            json=payload,
+            timeout=5
+        )
+
+        if r.status_code >= 300:
+
+            print(
+                f"Supabase log failed: "
+                f"{r.status_code} {r.text}"
+            )
+
+    except Exception as e:
+
+        print(
+            f"Supabase error: {e}"
+        )
 
 
 # ==========================================
@@ -373,6 +601,19 @@ class MarketEngine:
 
     def snapshot(self, symbol):
 
+        valid, result = validate_symbol(symbol)
+
+        if not valid:
+
+            print(
+                f"[Symbol Guard] BLOCKED market request: "
+                f"{symbol}"
+            )
+
+            return None
+
+        symbol = result
+
         try:
 
             df = pd.DataFrame(
@@ -381,6 +622,7 @@ class MarketEngine:
                     "15m",
                     limit=50
                 ),
+
                 columns=[
                     "timestamp",
                     "open",
@@ -420,20 +662,26 @@ class MarketEngine:
 
                 print(
                     f"Snapshot warning: "
-                    f"NaN indicator for {symbol}, skipping."
+                    f"NaN indicator for {symbol}"
                 )
 
                 return None
 
-
             return {
                 "symbol": symbol,
-                "price": float(last["close"]),
-                "rsi": float(last["RSI"]),
-                "ema20": float(last["EMA20"]),
-                "atr": float(last["ATR"])
-            }
 
+                "price":
+                    float(last["close"]),
+
+                "rsi":
+                    float(last["RSI"]),
+
+                "ema20":
+                    float(last["EMA20"]),
+
+                "atr":
+                    float(last["ATR"])
+            }
 
         except Exception as e:
 
@@ -445,8 +693,11 @@ class MarketEngine:
             return None
 
 
+market = MarketEngine()
+
+
 # ==========================================
-# PNL
+# PORTFOLIO / RISK
 # ==========================================
 
 def unrealized_pnl(pos, current_price):
@@ -462,23 +713,17 @@ def unrealized_pnl(pos, current_price):
     ) * pos["qty"]
 
 
-# ==========================================
-# EQUITY
-# ==========================================
-
 def calculate_equity(state, market):
 
     equity = state["portfolio"]["cash"]
 
     data_complete = True
 
-    for sym, pos in state[
-        "portfolio"
-    ]["positions"].items():
-
-        equity += pos["margin"]
+    for sym, pos in state["portfolio"]["positions"].items():
 
         snap = market.snapshot(sym)
+
+        equity += pos["margin"]
 
         if snap:
 
@@ -491,13 +736,8 @@ def calculate_equity(state, market):
 
             data_complete = False
 
-
     return equity, data_complete
 
-
-# ==========================================
-# EMOTIONAL SCORE
-# ==========================================
 
 def update_emotional_score(
     state,
@@ -545,10 +785,6 @@ def update_emotional_score(
     return score
 
 
-# ==========================================
-# DRAWDOWN PROTECTION
-# ==========================================
-
 def check_drawdown_protection(
     state,
     market
@@ -568,14 +804,12 @@ def check_drawdown_protection(
 
         return equity, None
 
-
     if equity > state.get(
         "peak_equity",
         INITIAL_CAPITAL
     ):
 
         state["peak_equity"] = equity
-
 
     peak = state["peak_equity"]
 
@@ -584,7 +818,6 @@ def check_drawdown_protection(
         if peak > 0
         else 0
     )
-
 
     if (
         drawdown_pct >= DRAWDOWN_WARN_PCT
@@ -597,13 +830,13 @@ def check_drawdown_protection(
         send_telegram(
             f"⚠️ [Drawdown Protection]\n"
             f"Equity هبط "
-            f"{drawdown_pct * 100:.1f}% "
+            f"{drawdown_pct*100:.1f}% "
             f"من الذروة "
             f"(${peak:.2f}).\n"
             f"Equity الحالي: "
             f"${equity:.2f}\n"
             f"سقف المخاطرة انخفض إلى "
-            f"{MAX_RISK_AFTER_DRAWDOWN * 100:.0f}%."
+            f"{MAX_RISK_AFTER_DRAWDOWN*100:.0f}%."
         )
 
         log_to_supabase(
@@ -613,7 +846,6 @@ def check_drawdown_protection(
                 "peak_equity": peak
             }
         )
-
 
     elif (
         drawdown_pct < DRAWDOWN_WARN_PCT
@@ -637,13 +869,8 @@ def check_drawdown_protection(
             }
         )
 
-
     return equity, drawdown_pct
 
-
-# ==========================================
-# EFFECTIVE RISK
-# ==========================================
 
 def get_effective_max_risk(state):
 
@@ -694,17 +921,24 @@ class PaperBroker:
         strategy
     ):
 
+        # HARD SYMBOL GUARD
+        valid, result = validate_symbol(symbol)
+
+        if not valid:
+
+            return result
+
+        symbol = result
+
         if direction not in VALID_DIRECTIONS:
 
             return {
                 "ok": False,
-                "error": (
+                "error":
                     f"Invalid direction "
-                    f"'{direction}'. "
-                    f"Must be 'Long' or 'Short'."
-                )
+                    f"'{direction}'. Must be "
+                    f"'Long' or 'Short'."
             }
-
 
         if symbol in state[
             "portfolio"
@@ -715,20 +949,7 @@ class PaperBroker:
                 "error": "Position exists"
             }
 
-
-        try:
-
-            requested_risk = float(
-                risk_pct
-            )
-
-        except Exception:
-
-            return {
-                "ok": False,
-                "error": "Invalid risk_pct"
-            }
-
+        requested_risk = float(risk_pct)
 
         if (
             not math.isfinite(
@@ -743,322 +964,10 @@ class PaperBroker:
                 "error": "Invalid risk_pct"
             }
 
-
         if requested_risk == 0:
 
             return {
                 "ok": False,
-                "error": (
+                "error":
                     "risk_pct is 0 - "
-                    "no position will be opened. "
-                    "Use wait() if you intend not to trade."
-                )
-            }
-
-
-        check_drawdown_protection(
-            state,
-            self.market
-        )
-
-
-        snap = self.market.snapshot(
-            symbol
-        )
-
-        if not snap:
-
-            return {
-                "ok": False,
-                "error": "No market data"
-            }
-
-
-        effective_max, emo_state, emo_score = (
-            get_effective_max_risk(state)
-        )
-
-
-        applied_risk = max(
-            MIN_RISK_FLOOR,
-            min(
-                effective_max,
-                requested_risk
-            )
-        )
-
-
-        price = snap["price"]
-
-        margin = (
-            state["portfolio"]["cash"]
-            * applied_risk
-        )
-
-
-        if margin <= 0:
-
-            return {
-                "ok": False,
-                "error": "Insufficient cash"
-            }
-
-
-        qty = margin / price
-
-        sl_dist = snap["atr"] * 2
-
-        tp_dist = snap["atr"] * 3
-
-
-        sl = (
-            price - sl_dist
-            if direction == "Long"
-            else price + sl_dist
-        )
-
-
-        tp = (
-            price + tp_dist
-            if direction == "Long"
-            else price - tp_dist
-        )
-
-
-        state["portfolio"]["cash"] -= margin
-
-
-        pos_data = {
-            "entry": price,
-            "qty": qty,
-            "margin": margin,
-            "direction": direction,
-            "sl": sl,
-            "tp": tp,
-            "strategy": strategy
-        }
-
-
-        state[
-            "portfolio"
-        ]["positions"][symbol] = pos_data
-
-
-        log_to_supabase(
-            "OPEN_POSITION",
-            {
-                "symbol": symbol,
-                "position": pos_data,
-                "requested_risk": requested_risk,
-                "applied_risk": applied_risk
-            }
-        )
-
-
-        note = ""
-
-        if applied_risk < requested_risk:
-
-            note = (
-                f" (قُلّص إلى "
-                f"{applied_risk * 100:.1f}% "
-                f"بسبب حالة: {emo_state})"
-            )
-
-
-        return {
-            "ok": True,
-            "symbol": symbol,
-            "direction": direction,
-            "entry": price,
-            "sl": sl,
-            "tp": tp,
-            "risk_pct_used": applied_risk,
-            "note": note
-        }
-
-
-    def close_position(
-        self,
-        state,
-        symbol,
-        reason
-    ):
-
-        if symbol not in state[
-            "portfolio"
-        ]["positions"]:
-
-            return {
-                "ok": False,
-                "error": "No open position"
-            }
-
-
-        pos = state[
-            "portfolio"
-        ]["positions"][symbol]
-
-
-        snap = self.market.snapshot(
-            symbol
-        )
-
-
-        if not snap:
-
-            return {
-                "ok": False,
-                "error": "No market data"
-            }
-
-
-        price = snap["price"]
-
-        pnl = unrealized_pnl(
-            pos,
-            price
-        )
-
-
-        state["portfolio"]["cash"] += (
-            pos["margin"] + pnl
-        )
-
-
-        trade_record = {
-            "symbol": symbol,
-            "strategy": pos["strategy"],
-            "pnl": pnl,
-            "reason": reason
-        }
-
-
-        state[
-            "trade_history"
-        ].append(trade_record)
-
-
-        del state[
-            "portfolio"
-        ]["positions"][symbol]
-
-
-        new_score = update_emotional_score(
-            state,
-            pnl,
-            pos["margin"]
-        )
-
-
-        equity, drawdown_pct = (
-            check_drawdown_protection(
-                state,
-                self.market
-            )
-        )
-
-
-        trade_record[
-            "equity_after"
-        ] = equity
-
-        trade_record[
-            "emotional_score_after"
-        ] = new_score
-
-        trade_record[
-            "equity_data_complete"
-        ] = (
-            drawdown_pct is not None
-        )
-
-
-        log_to_supabase(
-            "CLOSE_POSITION",
-            trade_record
-        )
-
-
-        return {
-            "ok": True,
-            "pnl": pnl,
-            "equity_after": equity,
-            "emotional_score_after": new_score
-        }
-
-
-# ==========================================
-# GLOBAL OBJECTS
-# ==========================================
-
-memory = StructuredMemory()
-
-market = MarketEngine()
-
-broker = PaperBroker(
-    memory,
-    market
-)
-
-
-# ==========================================
-# GEMINI TOOLS
-# ==========================================
-
-def get_portfolio_state() -> dict:
-
-    state = safe_read_memory(
-        "get_portfolio_state"
-    )
-
-    if state is None:
-
-        return {
-            "ok": False,
-            "error": "Memory corrupted"
-        }
-
-
-    equity, data_complete = (
-        calculate_equity(
-            state,
-            market
-        )
-    )
-
-
-    effective_max, emo_state, emo_score = (
-        get_effective_max_risk(
-            state
-        )
-    )
-
-
-    portfolio = dict(
-        state["portfolio"]
-    )
-
-
-    portfolio["equity"] = equity
-
-    portfolio[
-        "equity_data_complete"
-    ] = data_complete
-
-    portfolio[
-        "risk_mode"
-    ] = state.get(
-        "risk_mode",
-        "normal"
-    )
-
-    portfolio[
-        "emotional_score"
-    ] = emo_score
-
-    portfolio[
-        "emotional_state"
-    
-
-
+            
